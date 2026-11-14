@@ -10,6 +10,6 @@ window.FICHAS_CONFIG = {
   // Deixe vazio o que não quiser mostrar.
   valor: "R$ 150,00 (pagamento único)",          // ex.: "R$ 150,00 (pagamento único)"
   pixChave: "83998321210",       // sua chave PIX
-  pixNome: "",          // nome que aparece no PIX
+  pixNome: "Maria Natália de Lima Sousa",        // nome que aparece no PIX
   contatoWhatsapp: "83998321210",  // só números com DDD, ex.: "11987654321"
 };
