@@ -315,7 +315,7 @@ const S = {
   clientes: new Map(), produtos: [], config: { ...DEFAULT_CONFIG },
   tab: "hoje", clienteId: null, busca: "", filtro: "todos",
   mode: "boot", // boot | auth | recovery | pendente | bloqueado | app
-  authTab: "entrar", souFunc: false, admin: null, equipe: null,
+  authTab: "entrar", souFunc: false, admin: null, equipe: null, backups: null,
 };
 const app = document.getElementById("app");
 const tabsEl = document.getElementById("tabs");
@@ -502,7 +502,7 @@ function setTab(tab) {
   document.querySelectorAll(".tab").forEach(b => b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false"));
   render(); window.scrollTo(0, 0);
   if (tab === "conta" && S.profile && S.profile.is_admin) carregarLicencas();
-  if (tab === "conta" && !ehFunc()) carregarEquipe();
+  if (tab === "conta" && !ehFunc()) { carregarEquipe(); carregarBackups(); }
 }
 function openFicha(id) { S.clienteId = id; render(); window.scrollTo(0, 0); }
 
@@ -654,7 +654,12 @@ function viewHoje() {
       </ol>`}
       <button class="btn primary" data-action="novo-cliente">${I.plus} Adicionar primeiro cliente</button>
     </div>` : "";
+  const diasCopia = diasDesde(ls.get(kCopiaExt())), diasLembrete = diasDesde(ls.get(kLembrete()));
+  const lembrete = !ehFunc() && S.clientes.size && (diasCopia === null || diasCopia >= 7) && (diasLembrete === null || diasLembrete >= 3)
+    ? `<div class="note" style="display:grid;gap:8px"><span>${diasCopia === null ? "Guarde uma cópia das suas fichas no Google Drive." : `Faz ${diasCopia} dias que você não guarda uma cópia no Drive.`} Leva 10 segundos.</span>
+        <div class="row"><button class="btn primary sm" data-action="enviar-copia">Enviar para o Drive</button><button class="btn ghost sm" data-action="lembrete-depois">Depois</button></div></div>` : "";
   return `<div class="today"><div class="eyebrow">${esc(lojaNome())} · ${esc(weekday(hoje))}</div><h1>${esc(longDate(hoje))}</h1></div>
+    ${lembrete}
     ${ehFunc() ? "" : `<div class="stats">
       <div class="stat"><span class="eyebrow">A receber</span><b>${money(aReceber)}</b></div>
       <div class="stat hot"><span class="eyebrow">Já vencido</span><b>${money(vencido)}</b></div>
@@ -779,14 +784,106 @@ function viewConta() {
       <div><button type="submit" class="btn primary sm">Salvar</button></div>
     </form>
     ${viewEquipe()}
-    <section class="card pad" style="display:grid;gap:8px">
-      <div class="eyebrow">Cópia de segurança</div>
-      <p class="small muted" style="margin:0">Baixe uma planilha com todos os clientes e saldos, ou uma cópia completa dos dados. Guarde no Google Drive ou mande para o seu WhatsApp.</p>
-      <div class="row"><button class="btn sm" data-action="csv">${I.dl} Planilha (CSV)</button><button class="btn sm" data-action="backup">${I.dl} Cópia completa (JSON)</button></div>
-    </section>
+    ${viewBackups()}
     ${adm}
     <div class="row"><span class="small muted grow">Conectado como ${esc(S.user.email)}</span><button class="btn sm" data-action="sair">Sair</button></div>`;
 }
+/* ---------- cópias de segurança ---------- */
+const kCopiaExt = () => "fichas:copia-externa:" + S.user.id;
+const kLembrete = () => "fichas:lembrete-copia:" + S.user.id;
+const diasDesde = ts => ts ? Math.floor((Date.now() - ts) / 86400000) : null;
+const MOTIVOS = { diaria: "Automática", manual: "Feita por você", "antes de restaurar": "Antes de restaurar" };
+function viewBackups() {
+  const B = S.backups;
+  let lista;
+  if (!B) lista = `<p class="small muted" style="margin:0">Carregando…</p>`;
+  else if (B.error) lista = `<p class="err-msg" style="margin:0">${esc(B.error)}</p>`;
+  else if (!B.list.length) lista = `<p class="small muted" style="margin:0">A primeira cópia automática é feita esta madrugada.</p>`;
+  else lista = `<div class="list">${B.list.map(b => {
+    const d = new Date(b.criado_em);
+    const quando = `${fmtDate(isoOf(d), true)} às ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    return `<div class="item" style="cursor:default;grid-template-columns:minmax(0,1fr) auto">
+      <div class="who"><b>${esc(quando)}</b><span>${esc(MOTIVOS[b.motivo] || b.motivo)} · ${b.clientes} cliente${b.clientes === 1 ? "" : "s"}</span></div>
+      <div class="row" style="justify-content:flex-end;gap:4px"><button class="btn ghost sm" data-action="bk-baixar" data-id="${b.id}" aria-label="Baixar">${I.dl}</button><button class="btn sm" data-action="bk-restaurar" data-id="${b.id}" data-q="${esc(quando)}">Restaurar</button></div>
+    </div>`;
+  }).join("")}</div>`;
+  const dias = diasDesde(ls.get(kCopiaExt()));
+  return `<section class="section">
+    <div class="section-h"><h2>Cópias de segurança</h2><span class="grow"></span><button class="btn ghost sm" data-action="bk-reload">Atualizar</button></div>
+    <p class="small muted" style="margin:0">Toda madrugada o sistema guarda sozinho uma cópia de todos os clientes, compras e pagamentos, sempre que algo mudou. Ficam as cópias dos últimos 30 dias. Se apagar algo sem querer, toque em <b>Restaurar</b> na cópia do dia certo.</p>
+    ${lista}
+    <div class="row"><button class="btn sm" data-action="bk-agora">Fazer cópia agora</button></div>
+    <div class="card pad" style="display:grid;gap:8px">
+      <div class="eyebrow">Cópia fora do sistema</div>
+      <p class="small muted" style="margin:0">As cópias acima ficam junto com o sistema. Uma vez por semana, guarde também uma no seu Google Drive: toque no botão e escolha <b>Drive</b>. ${dias === null ? "Você ainda não guardou nenhuma." : `A última foi ${dias === 0 ? "hoje" : dias === 1 ? "ontem" : "há " + dias + " dias"}.`}</p>
+      <div class="row"><button class="btn primary sm" data-action="enviar-copia">${I.dl} Enviar para o Drive</button><button class="btn sm" data-action="csv">Planilha (CSV)</button></div>
+    </div>
+  </section>`;
+}
+async function carregarBackups() {
+  if (!S.authOk) { S.backups = { error: "Sem internet. Conecte para ver as cópias." }; render(true); return; }
+  const { data, error } = await S.sb.from("backups").select("id,criado_em,motivo,clientes").order("criado_em", { ascending: false }).limit(40);
+  S.backups = error ? { error: isNetErr(error) ? "Sem internet. Conecte para ver as cópias." : "Não foi possível carregar: " + error.message } : { list: data || [] };
+  if (S.tab === "conta" && !S.clienteId) render(true);
+}
+function arquivoCopia(clientes, produtos, config, quando) {
+  return JSON.stringify({ loja: lojaNome(), geradoEm: quando || new Date().toISOString(), clientes, produtos, config }, null, 2);
+}
+function csvClientes() {
+  const q = s => `"${String(s ?? "").replace(/"/g, '""')}"`;
+  const brl = c => (c / 100).toFixed(2).replace(".", ",");
+  const rows = [["Ficha", "Nome", "Telefone", "Endereço", "Referência", "Comprou", "Pagou", "Saldo", "Vencido", "Próxima visita"].map(q).join(";")];
+  for (const c of [...S.clientes.values()].sort((a, b) => (a.numero || 0) - (b.numero || 0))) {
+    const r = resumo(c);
+    rows.push([c.numero, c.nome, c.telefone, enderecoCompleto(c), c.referencia, brl(r.total), brl(r.pago), brl(r.saldo), brl(r.vencido), r.visita ? fmtDate(r.visita, true) : ""].map(q).join(";"));
+  }
+  return "\ufeff" + rows.join("\r\n");
+}
+// abre a tela de compartilhar do celular (Drive, WhatsApp, e-mail); no computador, baixa os arquivos
+async function enviarCopia() {
+  const st = today();
+  const json = arquivoCopia([...S.clientes.values()], S.produtos, S.config);
+  const files = [
+    new File([json], `copia-fichas-${st}.txt`, { type: "text/plain" }),
+    new File([csvClientes()], `clientes-${st}.csv`, { type: "text/csv" }),
+  ];
+  try {
+    if (navigator.canShare && navigator.canShare({ files })) {
+      await navigator.share({ files, title: "Cópia das fichas " + fmtDate(st, true) });
+      ls.set(kCopiaExt(), Date.now()); toast("Cópia enviada"); render(true); return;
+    }
+  } catch (e) { if (e && e.name === "AbortError") return; }
+  baixar(`copia-fichas-${st}.json`, new Blob([json], { type: "application/json" }));
+  ls.set(kCopiaExt(), Date.now()); toast("Arquivo baixado. Guarde no seu Drive."); render(true);
+}
+async function baixarBackup(id) {
+  if (!S.authOk) { toast("Sem internet."); return; }
+  const { data, error } = await S.sb.from("backups").select("criado_em,dados").eq("id", id).maybeSingle();
+  if (error || !data) { toast("Não foi possível baixar: " + (error ? error.message : "cópia não encontrada")); return; }
+  const d = data.dados || {};
+  const json = arquivoCopia((d.clientes || []).map(fromRow), d.produtos || [], (d.loja && d.loja.config) || {}, data.criado_em);
+  baixar(`copia-fichas-${String(data.criado_em).slice(0, 10)}.json`, new Blob([json], { type: "application/json" }));
+}
+function confirmarRestaurar(id, quando) {
+  openSheet("Restaurar cópia", `
+    <p style="margin:0">Voltar a loja para a cópia de <b>${esc(quando)}</b>?</p>
+    <p class="small muted" style="margin:0">Todos os clientes, compras, pagamentos e produtos ficam exatamente como estavam nesse momento. O que foi lançado depois some, inclusive pelos funcionários. Antes de restaurar, o sistema guarda uma cópia de como está agora, então dá para desfazer.</p>
+    <div class="err-msg" id="rs-err" hidden></div>
+    <div class="row"><button type="submit" class="btn danger armed grow">Restaurar</button><button type="button" class="btn" data-close="1">Cancelar</button></div>
+  `, form => form.addEventListener("submit", async e => {
+    e.preventDefault();
+    const er = form.querySelector("#rs-err"), btn = form.querySelector('[type="submit"]');
+    const fail = m => { er.textContent = m; er.hidden = false; btn.disabled = false; };
+    if (!S.authOk) return fail("Sem internet. Conecte para restaurar.");
+    if (outbox.length) { await flush(); if (outbox.length) return fail("Ainda há lançamentos para enviar. Espere aparecer \"Salvo\" no topo e tente de novo."); }
+    btn.disabled = true;
+    const { data, error } = await S.sb.rpc("backup_restaurar", { p_id: +id });
+    if (error) return fail(isNetErr(error) ? "Sem internet. Tente de novo." : error.message);
+    closeSheet(); toast(`Loja restaurada: ${data} clientes`);
+    S.clienteId = null; await sincronizar(); carregarBackups();
+  }));
+}
+
 function viewEquipe() {
   const E = S.equipe;
   let body;
@@ -1210,18 +1307,8 @@ function baixar(filename, blob) {
 }
 function exportar(kind) {
   const stamp = today();
-  if (kind === "csv") {
-    const q = s => `"${String(s ?? "").replace(/"/g, '""')}"`;
-    const brl = c => (c / 100).toFixed(2).replace(".", ",");
-    const rows = [["Ficha", "Nome", "Telefone", "Endereço", "Referência", "Comprou", "Pagou", "Saldo", "Vencido", "Próxima visita"].map(q).join(";")];
-    for (const c of [...S.clientes.values()].sort((a, b) => (a.numero || 0) - (b.numero || 0))) {
-      const r = resumo(c);
-      rows.push([c.numero, c.nome, c.telefone, enderecoCompleto(c), c.referencia, brl(r.total), brl(r.pago), brl(r.saldo), brl(r.vencido), r.visita ? fmtDate(r.visita, true) : ""].map(q).join(";"));
-    }
-    baixar(`clientes-${stamp}.csv`, new Blob(["﻿" + rows.join("\r\n")], { type: "text/csv;charset=utf-8" }));
-  } else {
-    baixar(`backup-fichas-${stamp}.json`, new Blob([JSON.stringify({ loja: lojaNome(), geradoEm: new Date().toISOString(), clientes: [...S.clientes.values()], produtos: S.produtos, config: S.config }, null, 2)], { type: "application/json" }));
-  }
+  if (kind === "csv") baixar(`clientes-${stamp}.csv`, new Blob([csvClientes()], { type: "text/csv;charset=utf-8" }));
+  else baixar(`copia-fichas-${stamp}.json`, new Blob([arquivoCopia([...S.clientes.values()], S.produtos, S.config)], { type: "application/json" }));
 }
 
 /* ---------- eventos ---------- */
@@ -1259,6 +1346,18 @@ app.addEventListener("click", async e => {
     case "sair": sair(); break;
     case "lic-reload": S.admin = null; render(); carregarLicencas(); break;
     case "equipe-reload": S.equipe = null; render(); carregarEquipe(); break;
+    case "bk-reload": S.backups = null; render(); carregarBackups(); break;
+    case "bk-baixar": b.disabled = true; await baixarBackup(b.dataset.id); b.disabled = false; break;
+    case "bk-restaurar": confirmarRestaurar(b.dataset.id, b.dataset.q); break;
+    case "bk-agora": {
+      if (!S.authOk) { toast("Sem internet."); break; }
+      b.disabled = true; await flush();
+      const { error } = await S.sb.rpc("backup_agora");
+      toast(error ? "Não foi possível: " + error.message : "Cópia feita");
+      S.backups = null; render(); carregarBackups(); break;
+    }
+    case "enviar-copia": enviarCopia(); break;
+    case "lembrete-depois": ls.set(kLembrete(), Date.now()); render(); break;
     case "func-remover": {
       if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = "Confirmar"; return; }
       b.disabled = true;
@@ -1403,7 +1502,7 @@ async function carregarPerfil() {
   if (!S.user || S.mode === "recovery") return;
   const cache = ls.get(kCache());
   outbox = migrarOutbox(ls.get(kOutbox()) || []); ls.set(kOutbox(), outbox);
-  S.clientes = new Map(); S.produtos = []; S.equipe = null; S.admin = null; S.ultimaSync = 0;
+  S.clientes = new Map(); S.produtos = []; S.equipe = null; S.admin = null; S.backups = null; S.ultimaSync = 0;
   if (cache && cache.profile) {
     aplicarPerfil(cache.profile, cache.loja);
     if (S.mode === "app") {

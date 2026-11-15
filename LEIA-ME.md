@@ -11,14 +11,15 @@ Contas novas ficam "aguardando liberação" até você receber o PIX e liberar n
 - `config.js`: endereço e chave do Supabase, valor, chave PIX e WhatsApp de contato
 - `supabase/schema.sql`: banco de dados com as regras de privacidade
 - `supabase/correcao-seguranca.sql`: rodar logo depois do `schema.sql` (tira as funções internas da API)
-- `supabase/funcionarios.sql`: rodar por último (funcionários e gravação por lançamento)
+- `supabase/funcionarios.sql`: funcionários e gravação por lançamento
+- `supabase/backups.sql`: rodar por último (cópias automáticas diárias)
 - `logo.png`: logo oficial da ANS, que aparece no cabeçalho
 - `icon.svg`, `manifest.webmanifest`: ícone do aplicativo e instalação no celular
 
 ## Passos para colocar no ar (para o Claude da próxima sessão)
 
-1. Aplicar como migração, nesta ordem: `supabase/schema.sql`, `supabase/correcao-seguranca.sql` e `supabase/funcionarios.sql`.
-2. Rodar os avisos de segurança (get_advisors) e corrigir o que aparecer. Ficam três avisos esperados de funções que pessoas logadas podem chamar: `admin_set_status`, `funcionario_convidar` e `funcionario_remover`. Cada uma confere dentro dela quem está chamando.
+1. Aplicar como migração, nesta ordem: `supabase/schema.sql`, `supabase/correcao-seguranca.sql`, `supabase/funcionarios.sql` e `supabase/backups.sql`.
+2. Rodar os avisos de segurança (get_advisors) e corrigir o que aparecer. Ficam avisos esperados de funções que pessoas logadas podem chamar: `admin_set_status`, `funcionario_convidar`, `funcionario_remover`, `backup_agora` e `backup_restaurar`. Cada uma confere dentro dela quem está chamando.
 3. Preencher `config.js` com a URL do projeto e a chave publishable. Pedir à usuária o valor, a chave PIX, o nome do PIX e o WhatsApp de contato. Não inventar esses dados.
 4. Criar um repositório no GitHub da usuária e publicar pelo GitHub Pages, a partir da raiz da branch `main`. O arquivo `.nojekyll` já está incluído.
 5. Pedir à usuária para configurar no painel do Supabase, em Authentication > URL Configuration, o Site URL e o Redirect URL com o endereço do GitHub Pages.
@@ -53,4 +54,5 @@ Depois de abrir uma vez com internet, o sistema abre sem internet no mesmo celul
 
 - Cerca de 50 mil usuários e 500 MB de banco. Dá para muitas lojas, porque cada ficha é pequena.
 - Projetos grátis são **pausados depois de 7 dias sem nenhum acesso**. Com os comerciantes usando todo dia, isso não acontece. Se acontecer, basta reativar o projeto no painel do Supabase.
-- O plano grátis não tem backup automático. Cada loja pode baixar a própria cópia de segurança na aba Conta.
+- O plano grátis não tem backup automático do Supabase. Por isso o próprio banco guarda, toda madrugada (03:00), uma cópia de cada loja ativa quando algo mudou, e mantém 30 dias. A dona vê, baixa e restaura essas cópias em **Conta > Cópias de segurança**.
+- Essas cópias ficam no mesmo Supabase. Para ter uma cópia fora dele, o sistema lembra a dona uma vez por semana de tocar em **Enviar para o Drive**.
