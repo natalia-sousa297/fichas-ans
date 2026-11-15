@@ -56,7 +56,7 @@ header.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; 
 main { max-width: 760px; margin: 0 auto; padding-top: 18px; padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px)); padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 18px; }
 
 nav.tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; background: var(--surface); border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom, 0px); padding-left: max(8px, env(safe-area-inset-left, 0px)); padding-right: max(8px, env(safe-area-inset-right, 0px)); }
-.tabs-in { max-width: 760px; margin: 0 auto; display: grid; grid-template-columns: repeat(4, 1fr); }
+.tabs-in { max-width: 760px; margin: 0 auto; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
 .tab { background: none; border: 0; padding: 10px 4px 12px; display: grid; justify-items: center; gap: 3px; font-size: 12px; font-weight: 600; color: var(--muted); cursor: pointer; }
 .tab svg { width: 24px; height: 24px; }
 .tab[aria-current="page"] { color: var(--accent); }
@@ -186,6 +186,8 @@ td.r, th.r { text-align: right; }
 .quick { display: flex; gap: 6px; flex-wrap: wrap; }
 .err-msg { color: var(--danger); font-size: 13px; font-weight: 600; }
 .ok-msg { color: var(--accent); font-size: 13px; font-weight: 600; }
+.check { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 600; min-height: 44px; cursor: pointer; }
+.check input { width: 20px; height: 20px; accent-color: var(--accent); flex: none; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(84px + env(safe-area-inset-bottom, 0px)); z-index: 60; background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 99px; font-weight: 600; font-size: 14px; box-shadow: var(--shadow); max-width: calc(100% - 32px); }
 
 /* telas de acesso */
@@ -241,8 +243,8 @@ td.r, th.r { text-align: right; }
 <div id="sheet-root"></div>
 <div id="toast-root"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="vendor/supabase.js"></script>
+<script src="vendor/jspdf.umd.min.js"></script>
 <script src="config.js"></script>
 <script>
 (() => {
@@ -309,15 +311,15 @@ const ls = {
 /* ---------- estado ---------- */
 const CFG = window.FICHAS_CONFIG || {};
 const S = {
-  sb: null, user: null, profile: null,
+  sb: null, user: null, profile: null, loja: null, authOk: false, ultimaSync: 0,
   clientes: new Map(), produtos: [], config: { ...DEFAULT_CONFIG },
   tab: "hoje", clienteId: null, busca: "", filtro: "todos",
   mode: "boot", // boot | auth | recovery | pendente | bloqueado | app
-  authTab: "entrar", admin: null,
+  authTab: "entrar", souFunc: false, admin: null, equipe: null,
 };
 const app = document.getElementById("app");
 const tabsEl = document.getElementById("tabs");
-const lojaNome = () => (S.profile && S.profile.loja_nome) || "sua loja";
+const lojaNome = () => (S.loja && S.loja.loja_nome) || (S.profile && S.profile.loja_nome) || "sua loja";
 
 /* ---------- cálculos da ficha ---------- */
 function resumo(c) {
@@ -360,64 +362,132 @@ function gerarParcelas(itens, primeiroVenc, cfg) {
 
 /* ---------- linhas do banco <-> objetos ---------- */
 const fromRow = r => ({ id: r.id, numero: r.numero, nome: r.nome, telefone: r.telefone, rua: r.rua, numeroCasa: r.numero_casa, bairro: r.bairro, cidade: r.cidade, referencia: r.referencia, obs: r.obs, proximaVisita: r.proxima_visita || "", compras: r.compras || [], pagamentos: r.pagamentos || [], criadoEm: r.criado_em });
-const toRow = c => ({ id: c.id, owner: S.user.id, numero: c.numero || 0, nome: c.nome, telefone: c.telefone || "", rua: c.rua || "", numero_casa: c.numeroCasa || "", bairro: c.bairro || "", cidade: c.cidade || "", referencia: c.referencia || "", obs: c.obs || "", proxima_visita: c.proximaVisita || null, compras: c.compras || [], pagamentos: c.pagamentos || [], criado_em: c.criadoEm || today() });
 const prodRow = p => ({ id: p.id, owner: S.user.id, nome: p.nome, cat: p.cat, preco: p.preco });
+// campos simples da ficha: nome no aparelho -> nome no banco
+const CAMPOS = { nome: "nome", telefone: "telefone", rua: "rua", numeroCasa: "numero_casa", bairro: "bairro", cidade: "cidade", referencia: "referencia", obs: "obs", proximaVisita: "proxima_visita" };
+const camposDe = c => Object.fromEntries(Object.entries(CAMPOS).map(([k, col]) => [col, c[k] || ""]));
 
-/* ---------- gravação com fila (funciona sem internet e envia depois) ---------- */
+/* ---------- papel de quem usa ---------- */
+const ehFunc = () => !!(S.profile && S.profile.loja);
+const podeVender = () => !ehFunc() || !!S.config.funcVendas;
+
+/* ---------- gravação por operação, com fila (funciona sem internet e envia depois) ----------
+   Cada lançamento vira uma operação pequena ("acrescentar este pagamento", "mudar a data da visita").
+   Assim, duas pessoas mexendo na mesma ficha não apagam o trabalho uma da outra. */
 let outbox = [], flushing = false, inflight = null;
 const kOutbox = () => "fichas:outbox:" + S.user.id;
 const kCache = () => "fichas:cache:" + S.user.id;
-function saveCache() { ls.set(kCache(), { clientes: [...S.clientes.values()], produtos: S.produtos, profile: S.profile }); }
+const K_LAST = "fichas:ultimo-usuario";
+function saveCache() { ls.set(kCache(), { clientes: [...S.clientes.values()], produtos: S.produtos, profile: S.profile, loja: S.loja, salvoEm: Date.now() }); }
 function persistOutbox() { ls.set(kOutbox(), outbox); updateSync(); }
-function queue(item) {
-  outbox = outbox.filter(x => x === inflight || !(x.t === item.t && x.id === item.id));
-  outbox.push(item); persistOutbox(); saveCache(); flush();
-}
-const isNetErr = e => !navigator.onLine || /fetch|network|timeout|load failed/i.test(String((e && (e.message || e)) || ""));
-async function flush() {
-  if (flushing || !S.sb || !S.user) return;
-  flushing = true; updateSync();
-  try {
-    while (outbox.length) {
-      const it = inflight = outbox[0];
-      const tbl = it.t === "cli" ? "clientes" : "produtos";
-      let error;
-      try {
-        const res = it.op === "del" ? await S.sb.from(tbl).delete().eq("id", it.id) : await S.sb.from(tbl).upsert(it.row);
-        error = res.error;
-      } catch (e) { error = e; }
-      if (error && isNetErr(error)) break;
-      if (error) {
-        console.error(error);
-        toast(/row-level security|permission/i.test(error.message || "") ? "Seu acesso não permite salvar. Fale com o suporte." : "Um registro não foi salvo: " + (error.message || "erro"));
-      }
-      outbox = outbox.filter(x => x !== it); inflight = null; persistOutbox();
-    }
-  } finally { flushing = false; inflight = null; updateSync(); }
-}
-window.addEventListener("online", () => flush());
-setInterval(() => { if (outbox.length) flush(); }, 20000);
 
-function saveCliente(c) {
-  S.clientes.set(c.id, JSON.parse(JSON.stringify(c))); render();
-  queue({ t: "cli", op: "up", id: c.id, row: toRow(c) });
-}
-function deleteCliente(id) { S.clientes.delete(id); render(); queue({ t: "cli", op: "del", id }); }
-function saveProduto(p) { S.produtos = [...S.produtos.filter(x => x.id !== p.id), p]; render(); queue({ t: "prod", op: "up", id: p.id, row: prodRow(p) }); }
-function deleteProduto(id) { S.produtos = S.produtos.filter(x => x.id !== id); render(); queue({ t: "prod", op: "del", id }); }
-function applyOutboxLocally() {
-  for (const it of outbox) {
-    if (it.t === "cli") { if (it.op === "del") S.clientes.delete(it.id); else S.clientes.set(it.id, fromRow(it.row)); }
-    else { S.produtos = S.produtos.filter(p => p.id !== it.id); if (it.op !== "del") S.produtos.push({ id: it.row.id, nome: it.row.nome, cat: it.row.cat, preco: it.row.preco }); }
+function aplicarOp(op) {
+  if (op.t === "prod") {
+    S.produtos = S.produtos.filter(p => p.id !== op.id);
+    if (op.op !== "del") S.produtos.push({ id: op.row.id, nome: op.row.nome, cat: op.row.cat, preco: op.row.preco });
+    return;
+  }
+  const cur = S.clientes.get(op.cid);
+  const set = c => S.clientes.set(op.cid, c);
+  switch (op.k) {
+    case "cli": {
+      if (!cur && !op.criar) return;
+      const next = { ...(cur || { id: op.cid, numero: op.numero || 0, compras: [], pagamentos: [], criadoEm: op.campos.criado_em || today() }) };
+      for (const [k, col] of Object.entries(CAMPOS)) if (col in op.campos) next[k] = op.campos[col] || "";
+      set(next); break;
+    }
+    case "pag+": if (cur && !(cur.pagamentos || []).some(p => p.id === op.pag.id)) set({ ...cur, pagamentos: [...(cur.pagamentos || []), op.pag] }); break;
+    case "pag-": if (cur) set({ ...cur, pagamentos: (cur.pagamentos || []).filter(p => p.id !== op.id) }); break;
+    case "venda": if (cur) {
+      const has = (cur.compras || []).some(v => v.id === op.venda.id);
+      set({ ...cur, compras: has ? cur.compras.map(v => v.id === op.venda.id ? op.venda : v) : [...(cur.compras || []), op.venda] });
+    } break;
+    case "venda-": if (cur) set({ ...cur, compras: (cur.compras || []).filter(v => v.id !== op.id) }); break;
+    case "del": S.clientes.delete(op.cid); break;
   }
 }
+function applyOutboxLocally() { for (const op of outbox) aplicarOp(op); }
+function enviar(op) {
+  op = JSON.parse(JSON.stringify(op));
+  if (op.t === "prod") outbox = outbox.filter(x => x === inflight || !(x.t === "prod" && x.id === op.id));
+  aplicarOp(op); outbox.push(op);
+  persistOutbox(); saveCache(); render(); flush();
+}
+// fila salva por versões antigas do site (ficha inteira) vira operações
+function migrarOutbox(arr) {
+  const out = [];
+  for (const it of arr || []) {
+    if (!it) continue;
+    if (it.k || it.t === "prod") { out.push(it); continue; }
+    if (it.t === "cli" && it.op === "del") { out.push({ k: "del", cid: it.id }); continue; }
+    if (it.t === "cli" && it.row) {
+      const c = fromRow(it.row);
+      out.push({ k: "cli", cid: c.id, criar: true, numero: c.numero, campos: { ...camposDe(c), criado_em: c.criadoEm || today() } });
+      for (const v of c.compras) out.push({ k: "venda", cid: c.id, venda: v });
+      for (const p of c.pagamentos) out.push({ k: "pag+", cid: c.id, pag: p });
+    }
+  }
+  return out;
+}
+
+const isNetErr = e => !navigator.onLine || /fetch|network|timeout|load failed|abort|AuthRetryableFetchError/i.test(String((e && ((e.name || "") + " " + (e.message || e))) || ""));
+const isAuthErr = e => /jwt|PGRST301|401|not authenticated/i.test(String((e && ((e.code || "") + " " + (e.message || ""))) || ""));
+function executar(op) {
+  if (op.t === "prod") return op.op === "del" ? S.sb.from("produtos").delete().eq("id", op.id) : S.sb.from("produtos").upsert(op.row);
+  switch (op.k) {
+    case "cli": return S.sb.rpc("cliente_salvar", { p_id: op.cid, p_campos: op.campos, p_criar: !!op.criar });
+    case "pag+": return S.sb.rpc("pagamento_add", { p_cliente: op.cid, p_pag: op.pag });
+    case "pag-": return S.sb.rpc("pagamento_del", { p_cliente: op.cid, p_id: op.id });
+    case "venda": return S.sb.rpc("compra_salvar", { p_cliente: op.cid, p_compra: op.venda });
+    case "venda-": return S.sb.rpc("compra_del", { p_cliente: op.cid, p_id: op.id });
+    case "del": return S.sb.from("clientes").delete().eq("id", op.cid);
+  }
+  return Promise.resolve({ error: null });
+}
+async function flush() {
+  if (flushing || !S.sb || !S.user || !S.authOk) return;
+  flushing = true; updateSync();
+  let recusou = false;
+  try {
+    while (outbox.length) {
+      const op = inflight = outbox[0];
+      let res;
+      try { res = await executar(op); } catch (e) { res = { error: e }; }
+      const error = res && res.error;
+      if (error && (isNetErr(error) || isAuthErr(error))) break; // tenta de novo mais tarde
+      if (error) {
+        console.error(error); recusou = true;
+        toast(/funcion/i.test(error.message || "") ? error.message : /row-level security|permission/i.test(error.message || "") ? "Seu acesso não permite salvar isso." : "Um lançamento não foi salvo: " + (error.message || "erro"));
+      }
+      outbox = outbox.filter(x => x !== op); inflight = null; persistOutbox(); opsFeitas++;
+      const row = res && res.data && !Array.isArray(res.data) && res.data.id ? res.data : null;
+      if (row && !outbox.some(x => x.cid === row.id)) { S.clientes.set(row.id, fromRow(row)); saveCache(); render(true); }
+    }
+  } finally { flushing = false; inflight = null; updateSync(); }
+  if (recusou) sincronizar(); // desfaz no aparelho o que o banco recusou
+}
+window.addEventListener("online", () => { reconectar(); flush(); });
+setInterval(() => { if (outbox.length) flush(); }, 20000);
+
+function novoCliente(campos) {
+  const id = uuid();
+  const numero = Math.max(0, ...[...S.clientes.values()].map(x => x.numero || 0)) + 1;
+  enviar({ k: "cli", cid: id, criar: true, numero, campos: { ...campos, criado_em: today() } });
+  return id;
+}
+function salvarCampos(cid, campos) { if (Object.keys(campos).length) enviar({ k: "cli", cid, campos }); }
+function deleteCliente(id) { enviar({ k: "del", cid: id }); }
+function saveProduto(p) { enviar({ t: "prod", op: "up", id: p.id, row: prodRow(p) }); }
+function deleteProduto(id) { enviar({ t: "prod", op: "del", id }); }
 
 /* ---------- interface comum ---------- */
 function updateSync() {
   const el = document.getElementById("sync");
   if (S.mode !== "app") { el.innerHTML = ""; return; }
+  const online = navigator.onLine && S.authOk;
   let kind = "ok", text = "Salvo";
-  if (outbox.length) { kind = navigator.onLine ? "wait" : "err"; text = navigator.onLine ? `Salvando ${outbox.length}…` : `Sem internet · ${outbox.length} para enviar`; }
+  if (outbox.length) { kind = online ? "wait" : "err"; text = online ? `Salvando ${outbox.length}…` : `Sem internet · ${outbox.length} para enviar`; }
+  else if (!online) { kind = "wait"; text = "Sem internet · salvando no aparelho"; }
   el.innerHTML = `<span class="dot ${kind}"></span><span>${esc(text)}</span>`;
 }
 window.addEventListener("offline", updateSync);
@@ -432,21 +502,25 @@ function setTab(tab) {
   document.querySelectorAll(".tab").forEach(b => b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false"));
   render(); window.scrollTo(0, 0);
   if (tab === "conta" && S.profile && S.profile.is_admin) carregarLicencas();
+  if (tab === "conta" && !ehFunc()) carregarEquipe();
 }
 function openFicha(id) { S.clienteId = id; render(); window.scrollTo(0, 0); }
 
-function render() {
+// bg = atualização vinda da sincronização: não redesenha enquanto a pessoa digita em um campo da tela
+function render(bg) {
   tabsEl.hidden = S.mode !== "app";
+  const tp = tabsEl.querySelector('[data-tab="produtos"]'); if (tp) tp.hidden = ehFunc();
   updateSync();
-  if (S.mode === "auth") { app.innerHTML = viewAuth(); return; }
-  if (S.mode === "recovery") { app.innerHTML = viewRecovery(); return; }
+  if (S.mode === "auth") { if (!bg) app.innerHTML = viewAuth(); return; }
+  if (S.mode === "recovery") { if (!bg) app.innerHTML = viewRecovery(); return; }
   if (S.mode === "pendente" || S.mode === "bloqueado") { app.innerHTML = viewPendente(); return; }
   if (S.mode !== "app") return;
   const a = document.activeElement;
   if (a && app.contains(a) && a.id === "busca") { const l = document.getElementById("lista"); if (l) l.innerHTML = listaClientesHTML(); return; }
+  if (bg && a && app.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return;
   if (S.clienteId && S.clientes.has(S.clienteId)) app.innerHTML = viewFicha(S.clientes.get(S.clienteId));
   else if (S.tab === "clientes") { S.clienteId = null; app.innerHTML = viewClientes(); }
-  else if (S.tab === "produtos") { S.clienteId = null; app.innerHTML = viewProdutos(); }
+  else if (S.tab === "produtos" && !ehFunc()) { S.clienteId = null; app.innerHTML = viewProdutos(); }
   else if (S.tab === "conta") { S.clienteId = null; app.innerHTML = viewConta(); }
   else { S.clienteId = null; app.innerHTML = viewHoje(); }
 }
@@ -457,7 +531,7 @@ function viewAuth() {
   return `<div class="auth">
     <div class="auth-hero">
       <div class="eyebrow">Fichas ANS</div>
-      <h1>${esqueci ? "Recuperar senha" : entrar ? "Entre nas suas fichas" : "Crie a conta da sua loja"}</h1>
+      <h1>${esqueci ? "Recuperar senha" : entrar ? "Entre nas suas fichas" : S.souFunc ? "Crie sua conta de funcionário" : "Crie a conta da sua loja"}</h1>
       <p>${esqueci ? "Enviamos um link para o seu e-mail para criar uma senha nova." : "Clientes, vendas a prazo, pagamentos e visitas no celular. Cada loja vê só os próprios dados."}</p>
     </div>
     ${esqueci ? "" : `<div class="seg" role="group" aria-label="Acesso">
@@ -466,8 +540,15 @@ function viewAuth() {
     </div>`}
     <form id="auth-form" class="card pad" novalidate>
       ${!entrar && !esqueci ? `
+        <div class="chips" role="group" aria-label="Tipo de conta">
+          <button type="button" class="chip" data-func="0" aria-pressed="${!S.souFunc}">Sou dona(o) da loja</button>
+          <button type="button" class="chip" data-func="1" aria-pressed="${S.souFunc}">Sou funcionário</button>
+        </div>
+        ${S.souFunc ? `
+        <p class="small muted" style="margin:0">Use o mesmo e-mail que a loja cadastrou para você em <b>Conta &gt; Funcionários</b>.</p>
+        <div class="field"><label for="a-nome">Seu nome</label><input id="a-nome" class="input" required autocomplete="name"></div>` : `
         <div class="field"><label for="a-loja">Nome da loja</label><input id="a-loja" class="input" required autocomplete="organization"></div>
-        <div class="field"><label for="a-tel">WhatsApp</label><input id="a-tel" class="input num" type="tel" inputmode="tel" placeholder="(11) 98765-4321" autocomplete="tel"></div>` : ""}
+        <div class="field"><label for="a-tel">WhatsApp</label><input id="a-tel" class="input num" type="tel" inputmode="tel" placeholder="(11) 98765-4321" autocomplete="tel"></div>`}` : ""}
       <div class="field"><label for="a-email">E-mail</label><input id="a-email" class="input" type="email" required autocomplete="email" autocapitalize="off"></div>
       ${esqueci ? "" : `<div class="field"><label for="a-senha">Senha${entrar ? "" : " (mínimo 6 caracteres)"}</label><input id="a-senha" class="input" type="password" required autocomplete="${entrar ? "current-password" : "new-password"}"></div>`}
       <div class="err-msg" id="a-err" hidden></div>
@@ -490,6 +571,18 @@ function viewRecovery() {
 }
 function viewPendente() {
   const bloqueado = S.mode === "bloqueado";
+  const meta = (S.user && S.user.user_metadata) || {};
+  if (ehFunc() || meta.funcionario) {
+    const lojaSuspensa = ehFunc() && S.profile.status === "ativo";
+    const titulo = !ehFunc() ? "Falta a loja cadastrar você" : lojaSuspensa ? "Acesso da loja suspenso" : "Seu acesso foi removido";
+    const texto = !ehFunc() ? `Peça para a dona da loja abrir <b>Conta &gt; Funcionários</b> e cadastrar o e-mail <b>${esc(S.user && S.user.email)}</b>. Depois toque em Verificar.`
+      : lojaSuspensa ? "O acesso da loja está suspenso no momento. Fale com a dona da loja." : "A loja removeu o seu acesso. Se foi engano, peça para cadastrarem seu e-mail de novo.";
+    return `<div class="auth">
+      <div class="auth-hero"><div class="eyebrow">${esc(ehFunc() ? lojaNome() : "Fichas ANS")}</div><h1>${titulo}</h1><p>${texto}</p></div>
+      <div class="row"><button type="button" class="btn grow" data-act="verificar">Verificar de novo</button></div>
+      <div class="row"><span class="small muted grow">Conectado como ${esc(S.user && S.user.email)}</span><button type="button" class="btn link small" data-act="sair">Sair</button></div>
+    </div>`;
+  }
   const wa = digits(CFG.contatoWhatsapp);
   const waNum = wa ? (wa.length <= 11 ? "55" + wa : wa) : "";
   const msg = `Olá! Criei a conta da loja "${lojaNome()}" no Fichas ANS (${S.user && S.user.email}) e gostaria de liberar o acesso.`;
@@ -554,20 +647,20 @@ function viewHoje() {
   const vazio = S.clientes.size === 0 ? `<div class="card empty">
       <h3>Comece passando suas fichas de papel para cá</h3>
       <p>Cada cliente vira uma ficha com endereço, compras, pagamentos e a data de voltar.</p>
-      <ol class="steps small">
+      ${ehFunc() ? "" : `<ol class="steps small">
         <li>Cadastre seus produtos e preços em <b>Produtos</b> (opcional, agiliza a venda).</li>
         <li>Adicione o cliente com o endereço.</li>
         <li>Lance a venda: o Sacolão sai em ${S.config.sacolaoParcelas}x e limpeza/casa em ${S.config.prazoDias} dias.</li>
-      </ol>
+      </ol>`}
       <button class="btn primary" data-action="novo-cliente">${I.plus} Adicionar primeiro cliente</button>
     </div>` : "";
   return `<div class="today"><div class="eyebrow">${esc(lojaNome())} · ${esc(weekday(hoje))}</div><h1>${esc(longDate(hoje))}</h1></div>
-    <div class="stats">
+    ${ehFunc() ? "" : `<div class="stats">
       <div class="stat"><span class="eyebrow">A receber</span><b>${money(aReceber)}</b></div>
       <div class="stat hot"><span class="eyebrow">Já vencido</span><b>${money(vencido)}</b></div>
       <div class="stat good"><span class="eyebrow">Recebido em ${esc(monthName())}</span><b>${money(recebido)}</b></div>
       <div class="stat"><span class="eyebrow">Vendido em ${esc(monthName())}</span><b>${money(vendido)}</b></div>
-    </div>
+    </div>`}
     ${vazio || `${sec("Atrasadas", atras, true, "Nenhuma cobrança atrasada.")}
       ${sec("Passar hoje", hojeL, false, "Nenhuma visita marcada para hoje.")}
       ${sec("Próximos 7 dias", prox, false, "Nada marcado para a próxima semana.")}
@@ -623,8 +716,8 @@ function viewFicha(c) {
       <div><div class="lbl">Saldo devedor</div><div class="big">${money(r.saldo)}</div></div>
       <div class="side">${r.vencido ? `<span class="late">Vencido: <b>${money(r.vencido)}</b></span>` : ""}<span>Comprou: <b>${money(r.total)}</b></span><span>Pagou: <b>${money(r.pago)}</b></span></div>
     </div>
-    <div class="actions">
-      <button class="btn primary" data-action="venda" data-id="${esc(c.id)}">${I.cart} Nova venda</button>
+    <div class="actions" ${podeVender() ? "" : 'style="grid-template-columns:repeat(2,minmax(0,1fr))"'}>
+      ${podeVender() ? `<button class="btn primary" data-action="venda" data-id="${esc(c.id)}">${I.cart} Nova venda</button>` : ""}
       <button class="btn sun" data-action="pagamento" data-id="${esc(c.id)}" ${r.saldo ? "" : "disabled"}>${I.cash} Receber</button>
       <button class="btn" data-action="editar" data-id="${esc(c.id)}">${I.edit} Editar ficha</button>
     </div>
@@ -641,11 +734,11 @@ function viewFicha(c) {
           <div class="body"><b>Compra · ${fmtDate(e.data, true)}</b>
             <ul>${(e.v.itens || []).map(it => `<li>${esc(fmtQtd(it.qtd))} × ${esc(it.nome)} (${esc(CATS[it.cat] || "")}) — ${money(Math.round(it.qtd * it.preco))}${(it.vezes || 1) > 1 ? " em " + it.vezes + "x" : ""}</li>`).join("")}</ul>
             <div class="small muted" style="margin-top:4px">${(e.v.parcelas || []).map(p => `${fmtDate(p.venc)}: ${money(p.valor)}`).join(" · ")}</div></div>
-          <div class="amt"><span>${money(e.v.total)}</span></div><div class="ev-btns"><button class="btn sm" data-action="resumo-venda" data-id="${esc(c.id)}" data-item="${esc(e.v.id)}">Resumo</button><button class="btn ghost sm" data-action="edit-venda" data-id="${esc(c.id)}" data-item="${esc(e.v.id)}" aria-label="Editar compra">${I.edit}</button>${delBtn("del-venda", c.id, e.v.id)}</div></div>`
+          <div class="amt"><span>${money(e.v.total)}</span></div><div class="ev-btns"><button class="btn sm" data-action="resumo-venda" data-id="${esc(c.id)}" data-item="${esc(e.v.id)}">Resumo</button>${ehFunc() ? "" : `<button class="btn ghost sm" data-action="edit-venda" data-id="${esc(c.id)}" data-item="${esc(e.v.id)}" aria-label="Editar compra">${I.edit}</button>${delBtn("del-venda", c.id, e.v.id)}`}</div></div>`
         : `<div class="ev pay"><div class="ic">${I.cash}</div>
           <div class="body"><b>Pagamento · ${fmtDate(e.data, true)}</b>${e.p.obs ? `<div class="small muted">${esc(e.p.obs)}</div>` : ""}</div>
-          <div class="amt"><span>− ${money(e.p.valor)}</span>${delBtn("del-pag", c.id, e.p.id)}</div></div>`).join("")}</div>`
-        : `<div class="card empty"><p>Nenhuma compra lançada ainda.</p><button class="btn primary" data-action="venda" data-id="${esc(c.id)}">${I.cart} Lançar primeira venda</button></div>`}
+          <div class="amt"><span>− ${money(e.p.valor)}</span>${ehFunc() ? "" : delBtn("del-pag", c.id, e.p.id)}</div></div>`).join("")}</div>`
+        : `<div class="card empty"><p>Nenhuma compra lançada ainda.</p>${podeVender() ? `<button class="btn primary" data-action="venda" data-id="${esc(c.id)}">${I.cart} Lançar primeira venda</button>` : ""}</div>`}
     </section>
     <p class="small muted" style="margin:0">Cliente desde ${fmtDate(c.criadoEm, true)}.</p>`;
 }
@@ -664,6 +757,13 @@ function viewProdutos() {
 /* ---------- tela: Conta ---------- */
 function viewConta() {
   const p = S.profile || {};
+  if (ehFunc()) return `<h1 class="page-h">Conta</h1>
+    <section class="card pad" style="display:grid;gap:6px">
+      <div class="eyebrow">Funcionário</div>
+      <div style="font-size:18px;font-weight:800">${esc(p.nome || S.user.email)}</div>
+      <p class="small muted" style="margin:0">Você trabalha para <b>${esc(lojaNome())}</b>. Pode cadastrar clientes, receber pagamentos e marcar visitas${podeVender() ? " e lançar vendas" : ""}. Excluir e corrigir lançamentos fica com a loja.</p>
+    </section>
+    <div class="row"><span class="small muted grow">Conectado como ${esc(S.user.email)}</span><button class="btn sm" data-action="sair">Sair</button></div>`;
   const adm = p.is_admin ? viewAdmin() : "";
   return `<h1 class="page-h">Conta</h1>
     <form id="loja-form" class="card pad" style="display:grid;gap:12px" novalidate>
@@ -675,15 +775,60 @@ function viewConta() {
         <div class="field"><label for="cfg-prazo">Prazo (dias)</label><input id="cfg-prazo" class="input num" type="number" min="1" max="120" inputmode="numeric" value="${esc(S.config.prazoDias)}"></div>
       </div>
       <p class="small muted" style="margin:0">Na venda, o Sacolão já vem em ${esc(S.config.sacolaoParcelas)}x e os outros produtos em 1x, com ${esc(S.config.prazoDias)} dias entre as parcelas. Você pode mudar as vezes de cada produto na hora.</p>
+      <label class="check"><input type="checkbox" id="cfg-funcvendas" ${S.config.funcVendas ? "checked" : ""}> Funcionários podem lançar vendas</label>
       <div><button type="submit" class="btn primary sm">Salvar</button></div>
     </form>
+    ${viewEquipe()}
     <section class="card pad" style="display:grid;gap:8px">
       <div class="eyebrow">Cópia de segurança</div>
-      <p class="small muted" style="margin:0">Baixe uma planilha com todos os clientes e saldos, ou uma cópia completa dos dados.</p>
+      <p class="small muted" style="margin:0">Baixe uma planilha com todos os clientes e saldos, ou uma cópia completa dos dados. Guarde no Google Drive ou mande para o seu WhatsApp.</p>
       <div class="row"><button class="btn sm" data-action="csv">${I.dl} Planilha (CSV)</button><button class="btn sm" data-action="backup">${I.dl} Cópia completa (JSON)</button></div>
     </section>
     ${adm}
     <div class="row"><span class="small muted grow">Conectado como ${esc(S.user.email)}</span><button class="btn sm" data-action="sair">Sair</button></div>`;
+}
+function viewEquipe() {
+  const E = S.equipe;
+  let body;
+  if (!E) body = `<p class="small muted" style="margin:0">Carregando…</p>`;
+  else if (E.error) body = `<p class="err-msg" style="margin:0">${esc(E.error)}</p>`;
+  else {
+    const linhas = [
+      ...E.func.map(f => `<div class="item" style="cursor:default;grid-template-columns:minmax(0,1fr) auto">
+        <div class="who"><b>${esc(f.nome || f.email)}</b><span>${esc(f.email)} · ${f.status === "ativo" ? '<span class="pill ok">Ativo</span>' : '<span class="pill late">Sem acesso</span>'}</span></div>
+        ${f.status === "ativo" ? `<button class="btn danger sm" data-action="func-remover" data-id="${esc(f.id)}">Remover</button>` : `<button class="btn sm" data-action="func-reativar" data-email="${esc(f.email)}" data-nome="${esc(f.nome)}">Devolver acesso</button>`}
+      </div>`),
+      ...E.convites.map(cv => `<div class="item" style="cursor:default;grid-template-columns:minmax(0,1fr) auto">
+        <div class="who"><b>${esc(cv.nome || cv.email)}</b><span>${esc(cv.email)} · <span class="pill part">Falta criar a conta</span></span></div>
+        <button class="btn ghost sm" data-action="convite-cancelar" data-email="${esc(cv.email)}">Cancelar</button>
+      </div>`),
+    ];
+    body = linhas.length ? `<div class="list">${linhas.join("")}</div>` : `<p class="small muted" style="margin:0">Nenhum funcionário cadastrado.</p>`;
+  }
+  return `<section class="section">
+    <div class="section-h"><h2>Funcionários</h2><span class="grow"></span><button class="btn ghost sm" data-action="equipe-reload">Atualizar</button></div>
+    <p class="small muted" style="margin:0">O funcionário vê as visitas e as fichas, cadastra clientes, recebe pagamentos e marca visitas${S.config.funcVendas ? " e lança vendas" : ""}. Ele <b>não vê</b> os totais da loja (a receber, vencido, recebido e vendido no mês), não baixa a cópia de segurança e não exclui nem corrige lançamentos.</p>
+    ${body}
+    <form id="func-form" class="card pad" style="display:grid;gap:10px" novalidate>
+      <div class="grid2">
+        <div class="field"><label for="fu-nome">Nome</label><input id="fu-nome" class="input" autocomplete="off"></div>
+        <div class="field"><label for="fu-email">E-mail dele</label><input id="fu-email" class="input" type="email" autocapitalize="off" autocomplete="off"></div>
+      </div>
+      <div class="err-msg" id="fu-err" hidden></div>
+      <div><button type="submit" class="btn primary sm">${I.plus} Cadastrar funcionário</button></div>
+      <p class="small muted" style="margin:0">Depois, mande o link do sistema para ele. Ele toca em <b>Criar conta</b>, escolhe <b>Sou funcionário</b> e usa este mesmo e-mail.</p>
+    </form>
+  </section>`;
+}
+async function carregarEquipe() {
+  if (!S.authOk) { S.equipe = { error: "Sem internet. Conecte para ver e cadastrar funcionários." }; render(true); return; }
+  const [f, c] = await Promise.all([
+    S.sb.from("profiles").select("id,nome,email,status").eq("loja", S.user.id).order("nome"),
+    S.sb.from("convites").select("email,nome").eq("loja", S.user.id).order("criado_em"),
+  ]);
+  const e = f.error || c.error;
+  S.equipe = e ? { error: isNetErr(e) ? "Sem internet. Conecte para ver e cadastrar funcionários." : "Não foi possível carregar: " + e.message } : { func: f.data || [], convites: c.data || [] };
+  if (S.tab === "conta" && !S.clienteId) render(true);
 }
 function viewAdmin() {
   const L = S.admin;
@@ -709,7 +854,7 @@ function viewAdmin() {
     ${body}</section>`;
 }
 async function carregarLicencas() {
-  const { data, error } = await S.sb.from("profiles").select("id,email,loja_nome,telefone,status,criado_em").order("criado_em", { ascending: false });
+  const { data, error } = await S.sb.from("profiles").select("id,email,loja_nome,telefone,status,criado_em").is("loja", null).order("criado_em", { ascending: false });
   S.admin = error ? { error: "Não foi possível carregar: " + error.message } : { list: data || [] };
   if (S.tab === "conta" && !S.clienteId) render();
 }
@@ -740,23 +885,27 @@ function formCliente(c) {
     <div class="field"><label for="f-obs">Observações</label><textarea id="f-obs" class="input" placeholder="Ex.: só está em casa depois das 17h">${esc(c.obs)}</textarea></div>
     <div class="err-msg" id="f-err" hidden></div>
     <button type="submit" class="btn primary">${isNew ? "Adicionar cliente" : "Salvar ficha"}</button>
-    ${isNew ? "" : `<div class="row" style="border-top:1px solid var(--line);padding-top:14px"><button type="button" class="btn danger sm" id="f-del">${I.trash}<span>Excluir cliente</span></button><span class="small muted" id="f-del-hint"></span></div>`}
+    ${isNew || ehFunc() ? "" : `<div class="row" style="border-top:1px solid var(--line);padding-top:14px"><button type="button" class="btn danger sm" id="f-del">${I.trash}<span>Excluir cliente</span></button><span class="small muted" id="f-del-hint"></span></div>`}
   `, form => {
     form.addEventListener("submit", e => {
       e.preventDefault();
       const g = id => form.querySelector("#" + id).value.trim();
       const nome = g("f-nome");
       if (!nome) { const er = form.querySelector("#f-err"); er.textContent = "Digite o nome do cliente."; er.hidden = false; return; }
-      const id = c.id || uuid();
-      const numero = c.numero || (Math.max(0, ...[...S.clientes.values()].map(x => x.numero || 0)) + 1);
-      saveCliente({ ...c, id, numero, nome, telefone: g("f-tel"), rua: g("f-rua"), numeroCasa: g("f-num"), bairro: g("f-bairro"), cidade: g("f-cidade"), referencia: g("f-ref"), obs: g("f-obs"), criadoEm: c.criadoEm || today(), compras: c.compras || [], pagamentos: c.pagamentos || [] });
-      closeSheet(); toast(isNew ? "Cliente adicionado" : "Ficha salva");
-      if (isNew) openFicha(id);
+      const novos = { nome, telefone: g("f-tel"), rua: g("f-rua"), numero_casa: g("f-num"), bairro: g("f-bairro"), cidade: g("f-cidade"), referencia: g("f-ref"), obs: g("f-obs") };
+      closeSheet();
+      if (isNew) { const id = novoCliente(novos); toast("Cliente adicionado"); openFicha(id); }
+      else {
+        // manda só o que mudou, para não desfazer o que outra pessoa alterou ao mesmo tempo
+        const antes = camposDe(S.clientes.get(c.id) || c), mudou = {};
+        for (const [k, v] of Object.entries(novos)) if (v !== antes[k]) mudou[k] = v;
+        salvarCampos(c.id, mudou); toast("Ficha salva");
+      }
     });
     const del = form.querySelector("#f-del");
     if (del) { let armed = false; del.addEventListener("click", () => {
       if (!armed) { armed = true; del.classList.add("armed"); del.querySelector("span").textContent = "Confirmar exclusão"; form.querySelector("#f-del-hint").textContent = "Toque de novo para apagar a ficha e todo o histórico."; return; }
-      deleteCliente(c.id); closeSheet(); S.clienteId = null; render(); toast("Cliente excluído");
+      closeSheet(); S.clienteId = null; deleteCliente(c.id); toast("Cliente excluído");
     }); }
   });
 }
@@ -837,18 +986,16 @@ function formVenda(c, venda) {
     });
     form.querySelector("#v-venc").addEventListener("change", e => { draft.venc = e.target.value; updateSum(); });
     form.addEventListener("submit", e => {
-      e.preventDefault(); if (typeof ro === "function" && ro()) return;
+      e.preventDefault();
       const its = parsed(), er = form.querySelector("#v-err");
       if (!its.length) { er.textContent = "Adicione pelo menos um item com produto, quantidade e preço."; er.hidden = false; return; }
       const venc = draft.venc || addDays(draft.data, S.config.prazoDias);
       const total = its.reduce((s, it) => s + Math.round(it.qtd * it.preco), 0);
       const nova = { id: editando ? venda.id : rid(), data: draft.data, itens: its, total, parcelas: gerarParcelas(its, venc, S.config) };
       const cur = S.clientes.get(c.id);
-      const compras = editando ? (cur.compras || []).map(v => v.id === venda.id ? nova : v) : [...(cur.compras || []), nova];
-      const next = { ...cur, compras };
-      if (!next.proximaVisita || next.proximaVisita < today()) next.proximaVisita = nova.parcelas[0].venc;
-      saveCliente(next);
       closeSheet();
+      enviar({ k: "venda", cid: c.id, venda: nova });
+      if (!cur.proximaVisita || cur.proximaVisita < today()) salvarCampos(c.id, { proxima_visita: nova.parcelas[0].venc });
       toast(editando ? "Compra atualizada" : "Venda de " + money(total) + " lançada");
       if (!editando) setTimeout(() => resumoVenda(S.clientes.get(c.id), nova.id, true), 250);
     });
@@ -993,8 +1140,10 @@ function formPagamento(c) {
       if (v > r.saldo) { er.textContent = `O valor não pode passar do saldo (${money(r.saldo)}).`; er.hidden = false; return; }
       const cur = S.clientes.get(c.id);
       const pag = { id: rid(), data: form.querySelector("#p-data").value || today(), valor: v, obs: form.querySelector("#p-obs").value.trim() };
-      saveCliente({ ...cur, pagamentos: [...(cur.pagamentos || []), pag], proximaVisita: visEl.value || "" });
-      closeSheet(); toast("Recebido " + money(v));
+      closeSheet();
+      enviar({ k: "pag+", cid: c.id, pag });
+      if ((visEl.value || "") !== (cur.proximaVisita || "")) salvarCampos(c.id, { proxima_visita: visEl.value || "" });
+      toast("Recebido " + money(v));
     });
   });
 }
@@ -1012,8 +1161,8 @@ function formVisita(c) {
     const sh = () => hint.textContent = inp.value ? `${weekday(inp.value)}, ${relDay(inp.value)}` : "";
     sh(); inp.addEventListener("input", sh);
     form.querySelectorAll("[data-d]").forEach(b => b.addEventListener("click", () => { inp.value = b.dataset.d; sh(); }));
-    form.querySelector("#vi-clear").addEventListener("click", () => { saveCliente({ ...S.clientes.get(c.id), proximaVisita: "" }); closeSheet(); toast("Data removida"); });
-    form.addEventListener("submit", e => { e.preventDefault(); saveCliente({ ...S.clientes.get(c.id), proximaVisita: inp.value || "" }); closeSheet(); toast(inp.value ? "Visita marcada para " + fmtDate(inp.value) : "Data removida"); });
+    form.querySelector("#vi-clear").addEventListener("click", () => { closeSheet(); salvarCampos(c.id, { proxima_visita: "" }); toast("Data removida"); });
+    form.addEventListener("submit", e => { e.preventDefault(); closeSheet(); salvarCampos(c.id, { proxima_visita: inp.value || "" }); toast(inp.value ? "Visita marcada para " + fmtDate(inp.value) : "Data removida"); });
   });
 }
 
@@ -1046,9 +1195,9 @@ function confirmDel(c, tipo, itemId) {
     <div class="row"><button type="submit" class="btn danger armed grow">Excluir</button><button type="button" class="btn" data-close="1">Cancelar</button></div>
   `, form => form.addEventListener("submit", e => {
     e.preventDefault();
-    const cur = S.clientes.get(c.id);
-    saveCliente(isVenda ? { ...cur, compras: cur.compras.filter(v => v.id !== itemId) } : { ...cur, pagamentos: cur.pagamentos.filter(p => p.id !== itemId) });
-    closeSheet(); toast("Lançamento excluído");
+    closeSheet();
+    enviar(isVenda ? { k: "venda-", cid: c.id, id: itemId } : { k: "pag-", cid: c.id, id: itemId });
+    toast("Lançamento excluído");
   }));
 }
 
@@ -1080,10 +1229,12 @@ tabsEl.addEventListener("click", e => { const b = e.target.closest("[data-tab]")
 app.addEventListener("click", async e => {
   const au = e.target.closest("[data-auth]");
   if (au) { S.authTab = au.dataset.auth; render(); return; }
+  const fu = e.target.closest("[data-func]");
+  if (fu) { S.souFunc = fu.dataset.func === "1"; render(); return; }
   const ac = e.target.closest("[data-act]");
   if (ac) {
     if (ac.dataset.act === "sair") return sair();
-    if (ac.dataset.act === "verificar") { ac.disabled = true; await carregarPerfil(); toast(S.mode === "app" ? "Acesso liberado!" : "Ainda não foi liberado."); return; }
+    if (ac.dataset.act === "verificar") { ac.disabled = true; if (!S.authOk) await reconectar(); await sincronizar(); toast(S.mode === "app" ? "Acesso liberado!" : S.authOk ? "Ainda não foi liberado." : "Sem internet."); render(); return; }
     if (ac.dataset.act === "copiar-pix") { try { await navigator.clipboard.writeText(CFG.pixChave); toast("Chave PIX copiada"); } catch (_) { const sel = getSelection(), rg = document.createRange(); rg.selectNodeContents(document.getElementById("pix-key")); sel.removeAllRanges(); sel.addRange(rg); } return; }
   }
   const b = e.target.closest("[data-action]"); if (!b) return;
@@ -1107,6 +1258,26 @@ app.addEventListener("click", async e => {
     case "backup": exportar("json"); break;
     case "sair": sair(); break;
     case "lic-reload": S.admin = null; render(); carregarLicencas(); break;
+    case "equipe-reload": S.equipe = null; render(); carregarEquipe(); break;
+    case "func-remover": {
+      if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = "Confirmar"; return; }
+      b.disabled = true;
+      const { error } = await S.sb.rpc("funcionario_remover", { p_id: b.dataset.id });
+      toast(error ? "Não foi possível remover: " + error.message : "Acesso removido");
+      carregarEquipe(); break;
+    }
+    case "func-reativar": {
+      b.disabled = true;
+      const { error } = await S.sb.rpc("funcionario_convidar", { p_email: b.dataset.email, p_nome: b.dataset.nome || "" });
+      toast(error ? "Não foi possível: " + error.message : "Acesso devolvido");
+      carregarEquipe(); break;
+    }
+    case "convite-cancelar": {
+      b.disabled = true;
+      const { error } = await S.sb.from("convites").delete().eq("email", b.dataset.email);
+      toast(error ? "Não foi possível cancelar: " + error.message : "Cadastro cancelado");
+      carregarEquipe(); break;
+    }
     case "lic": {
       b.disabled = true;
       const { error } = await S.sb.rpc("admin_set_status", { alvo: b.dataset.id, novo_status: b.dataset.s });
@@ -1127,16 +1298,30 @@ app.addEventListener("submit", async e => {
     if (senha.length < 6) { er.textContent = "A senha precisa ter pelo menos 6 caracteres."; er.hidden = false; return; }
     const { error } = await S.sb.auth.updateUser({ password: senha });
     if (error) { er.textContent = traduzErro(error); er.hidden = false; return; }
-    toast("Senha alterada"); history.replaceState(null, "", location.pathname); await carregarPerfil(); return;
+    toast("Senha alterada"); history.replaceState(null, "", location.pathname); S.mode = "boot"; await carregarPerfil(); return;
   }
   if (f.id === "loja-form") {
     e.preventDefault();
     const parc = Math.max(1, Math.min(12, parseInt(f.querySelector("#cfg-parc").value) || 2));
     const prazo = Math.max(1, Math.min(120, parseInt(f.querySelector("#cfg-prazo").value) || 30));
-    const patch = { loja_nome: f.querySelector("#c-loja").value.trim(), telefone: f.querySelector("#c-tel").value.trim(), config: { sacolaoParcelas: parc, prazoDias: prazo } };
+    const patch = { loja_nome: f.querySelector("#c-loja").value.trim(), telefone: f.querySelector("#c-tel").value.trim(), config: { ...S.config, sacolaoParcelas: parc, prazoDias: prazo, funcVendas: f.querySelector("#cfg-funcvendas").checked } };
     const { error } = await S.sb.from("profiles").update(patch).eq("id", S.user.id);
     if (error) { toast(isNetErr(error) ? "Sem internet. Tente salvar de novo quando conectar." : "Não foi possível salvar: " + error.message); return; }
-    S.profile = { ...S.profile, ...patch }; S.config = { ...DEFAULT_CONFIG, ...patch.config }; saveCache(); render(); toast("Dados da loja salvos");
+    S.profile = { ...S.profile, ...patch }; S.loja = S.profile; S.config = { ...DEFAULT_CONFIG, ...patch.config }; saveCache(); render(); toast("Dados da loja salvos");
+    return;
+  }
+  if (f.id === "func-form") {
+    e.preventDefault();
+    const nome = f.querySelector("#fu-nome").value.trim(), email = f.querySelector("#fu-email").value.trim().toLowerCase();
+    const er = f.querySelector("#fu-err"), btn = f.querySelector('[type="submit"]');
+    const fail = m => { er.textContent = m; er.hidden = false; btn.disabled = false; };
+    if (!nome) return fail("Digite o nome do funcionário.");
+    if (!/^\S+@\S+\.\S+$/.test(email)) return fail("Digite um e-mail válido.");
+    btn.disabled = true;
+    const { data, error } = await S.sb.rpc("funcionario_convidar", { p_email: email, p_nome: nome });
+    if (error) return fail(isNetErr(error) ? "Sem internet. Tente de novo quando conectar." : error.message);
+    toast(data === "convidado" ? "Cadastrado. Agora ele cria a conta com este e-mail." : "Acesso liberado para " + nome);
+    S.equipe = null; render(); carregarEquipe();
   }
 });
 
@@ -1171,76 +1356,175 @@ async function enviarAuth(f) {
     if (error) return fail(traduzErro(error));
     return; // onAuthStateChange continua
   }
-  const loja = f.querySelector("#a-loja").value.trim();
-  if (!loja) return fail("Digite o nome da sua loja.");
-  const { data, error } = await S.sb.auth.signUp({ email, password: senha, options: { emailRedirectTo: back, data: { loja_nome: loja, telefone: f.querySelector("#a-tel").value.trim() } } });
+  let meta;
+  if (S.souFunc) {
+    const nome = f.querySelector("#a-nome").value.trim();
+    if (!nome) return fail("Digite o seu nome.");
+    meta = { nome, funcionario: true };
+  } else {
+    const loja = f.querySelector("#a-loja").value.trim();
+    if (!loja) return fail("Digite o nome da sua loja.");
+    meta = { loja_nome: loja, telefone: f.querySelector("#a-tel").value.trim() };
+  }
+  const { data, error } = await S.sb.auth.signUp({ email, password: senha, options: { emailRedirectTo: back, data: meta } });
   if (error) return fail(traduzErro(error));
   if (!data.session) { ok.textContent = "Conta criada. Enviamos um link de confirmação para " + email + ". Depois de confirmar, volte aqui e entre."; ok.hidden = false; btn.disabled = false; }
 }
 async function sair() {
-  if (outbox.length && navigator.onLine) await flush();
+  if (outbox.length && S.authOk) await flush();
+  if (outbox.length && !confirm(`Ainda há ${outbox.length} lançamento(s) que não foram enviados por falta de internet. Eles ficam guardados neste aparelho e são enviados quando você entrar de novo com esta conta. Sair mesmo assim?`)) return;
+  ls.del(K_LAST);
   if (S.user) { ls.del(kCache()); if (!outbox.length) ls.del(kOutbox()); }
-  await S.sb.auth.signOut().catch(() => {});
+  await S.sb.auth.signOut({ scope: "local" }).catch(() => {});
+  sairLocal();
+}
+function sairLocal() {
+  S.user = null; S.authOk = false; S.mode = "auth"; S.authTab = "entrar";
+  S.clientes = new Map(); S.produtos = []; S.profile = null; S.loja = null; S.admin = null; S.equipe = null; outbox = [];
+  closeSheet(); render();
+}
+function erroConta(msg) {
+  S.mode = "auth"; tabsEl.hidden = true; updateSync();
+  app.innerHTML = `<div class="auth"><div class="card empty"><h3>Não foi possível abrir sua conta</h3><p>${esc(msg)}</p><div class="row" style="justify-content:center"><button class="btn" data-act="verificar">Tentar de novo</button><button class="btn" data-act="sair">Sair</button></div></div></div>`;
 }
 
-let carregando = null;
-async function carregarPerfil() {
-  if (!S.user) return;
-  const cache = ls.get(kCache());
-  const { data: prof, error } = await S.sb.from("profiles").select("*").eq("id", S.user.id).maybeSingle();
-  if (error && isNetErr(error) && cache && cache.profile) {
-    // sem internet: abre com a última cópia salva no aparelho
-    S.profile = cache.profile;
-  } else if (error || !prof) {
-    S.mode = "auth"; app.innerHTML = `<div class="auth"><div class="card empty"><h3>Não foi possível abrir sua conta</h3><p>${esc(error ? traduzErro(error) : "Perfil não encontrado. Fale com o suporte.")}</p><button class="btn" data-act="sair">Sair</button></div></div>`; tabsEl.hidden = true; return;
-  } else S.profile = prof;
-  S.config = { ...DEFAULT_CONFIG, ...(S.profile.config || {}) };
-  if (S.profile.status !== "ativo") { S.mode = S.profile.status === "bloqueado" ? "bloqueado" : "pendente"; render(); return; }
+/* perfil: a própria conta e, se for funcionário, a loja a que pertence */
+function aplicarPerfil(prof, loja) {
+  S.profile = prof;
+  S.loja = prof.loja ? (loja || (S.loja && S.loja.id === prof.loja ? S.loja : null)) : prof;
+  S.config = { ...DEFAULT_CONFIG, ...((S.loja && S.loja.config) || prof.config || {}) };
+  if (prof.status !== "ativo") S.mode = prof.status === "bloqueado" ? "bloqueado" : "pendente";
+  else if (prof.loja && S.loja && S.loja.status && S.loja.status !== "ativo") S.mode = "bloqueado";
+  else S.mode = "app";
+}
 
-  outbox = ls.get(kOutbox()) || [];
-  if (cache) {
-    S.clientes = new Map((cache.clientes || []).map(c => [c.id, c]));
-    S.produtos = cache.produtos || [];
-    applyOutboxLocally();
-    S.mode = "app"; render();
+// abre na hora com a cópia guardada no aparelho; depois atualiza pela internet
+async function carregarPerfil() {
+  if (!S.user || S.mode === "recovery") return;
+  const cache = ls.get(kCache());
+  outbox = migrarOutbox(ls.get(kOutbox()) || []); ls.set(kOutbox(), outbox);
+  S.clientes = new Map(); S.produtos = []; S.equipe = null; S.admin = null; S.ultimaSync = 0;
+  if (cache && cache.profile) {
+    aplicarPerfil(cache.profile, cache.loja);
+    if (S.mode === "app") {
+      S.clientes = new Map((cache.clientes || []).map(c => [c.id, c]));
+      S.produtos = cache.produtos || [];
+      applyOutboxLocally();
+    }
+    render();
+  } else if (!S.authOk) {
+    S.mode = "auth"; tabsEl.hidden = true; updateSync();
+    app.innerHTML = `<div class="auth"><div class="card empty"><h3>Sem internet</h3><p>Abra o sistema uma vez com internet para baixar suas fichas para este aparelho. Depois ele funciona sem internet.</p></div></div>`;
+    return;
   }
+  if (S.authOk) await sincronizar();
+}
+
+let sincronizando = null, opsFeitas = 0;
+function sincronizar() {
+  if (!sincronizando) sincronizando = _sincronizar().catch(e => console.error(e)).finally(() => { sincronizando = null; });
+  return sincronizando;
+}
+async function _sincronizar() {
+  if (!S.user || !S.authOk || S.mode === "recovery") return;
+  const feitasAntes = opsFeitas, antes = S.mode;
+  const { data: prof, error } = await S.sb.from("profiles").select("*").eq("id", S.user.id).maybeSingle();
+  if (error) {
+    if (isNetErr(error) || isAuthErr(error)) {
+      if (S.mode === "boot") erroConta("Sem internet. Confira a conexão e toque em Tentar de novo.");
+      else if (antes !== "app") toast("Sem internet. Tente de novo quando conectar.");
+      return;
+    }
+    if (antes !== "app") erroConta(traduzErro(error)); return;
+  }
+  if (!prof) { erroConta("Perfil não encontrado. Fale com o suporte."); return; }
+  let loja = null;
+  if (prof.loja) {
+    const r = await S.sb.from("profiles").select("id,loja_nome,telefone,config,status").eq("id", prof.loja).maybeSingle();
+    if (r.error) return;
+    loja = r.data || { id: prof.loja, status: "bloqueado" };
+  }
+  if (S.mode === "recovery") return;
+  aplicarPerfil(prof, loja);
+  if (S.mode !== "app") { saveCache(); render(); return; }
   const [cl, pr] = await Promise.all([
     S.sb.from("clientes").select("*").order("nome"),
     S.sb.from("produtos").select("id,nome,cat,preco").order("nome"),
   ]);
   if (cl.error || pr.error) {
     const e = cl.error || pr.error;
-    if (!cache) { S.mode = "app"; render(); }
-    toast(isNetErr(e) ? "Sem internet. Mostrando a última cópia salva no aparelho." : "Erro ao carregar: " + e.message);
-  } else {
-    S.clientes = new Map(cl.data.map(r => [r.id, fromRow(r)]));
-    S.produtos = pr.data;
-    applyOutboxLocally();
-    saveCache();
-    S.mode = "app"; render();
+    if (antes !== "app") render();
+    if (!isNetErr(e)) toast("Erro ao carregar: " + e.message);
+    return;
   }
+  S.clientes = new Map(cl.data.map(r => [r.id, fromRow(r)]));
+  S.produtos = pr.data;
+  applyOutboxLocally();
+  saveCache(); S.ultimaSync = Date.now();
+  render(antes === "app");
+  if (opsFeitas !== feitasAntes) setTimeout(sincronizar, 300); // algo foi gravado enquanto baixava
   flush();
 }
+
+/* ---------- sessão (entra sem internet com a última conta usada no aparelho) ---------- */
+const comTempo = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
+const fetchComTempo = (url, opts = {}) => {
+  const ctrl = new AbortController(), t = setTimeout(() => ctrl.abort(), 20000);
+  if (opts.signal) opts.signal.addEventListener("abort", () => ctrl.abort());
+  return fetch(url, { ...opts, signal: ctrl.signal }).finally(() => clearTimeout(t));
+};
+function entrarUsuario(user, autenticado) {
+  const mudou = user.id !== (S.user && S.user.id);
+  S.user = user;
+  if (autenticado) { S.authOk = true; ls.set(K_LAST, { id: user.id, email: user.email, user_metadata: user.user_metadata || {} }); }
+  if (S.mode === "recovery") return;
+  if (mudou) { carregarPerfil(); return; }
+  if (autenticado) { flush(); if (Date.now() - S.ultimaSync > 30000) sincronizar(); }
+  updateSync();
+}
+let reconectando = false;
+async function reconectar() {
+  if (reconectando || !S.sb || !S.user || S.authOk) return;
+  reconectando = true;
+  try {
+    const { data } = await comTempo(S.sb.auth.getSession(), 8000);
+    if (data && data.session) entrarUsuario(data.session.user, true);
+  } catch (_) {} finally { reconectando = false; }
+}
+setInterval(() => { if (S.user && !S.authOk && navigator.onLine) reconectar(); }, 30000);
 
 async function start() {
   if (!window.supabase || !CFG.supabaseUrl || !CFG.supabaseKey) {
     app.innerHTML = `<div class="auth"><div class="card empty"><h3>Sistema ainda não configurado</h3><p>Preencha o arquivo config.js com o endereço e a chave do Supabase.</p></div></div>`;
     return;
   }
-  S.sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseKey, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } });
-  S.sb.auth.onAuthStateChange((event, session) => {
-    if (event === "PASSWORD_RECOVERY") { S.user = session.user; S.mode = "recovery"; render(); return; }
-    const novo = session ? session.user : null;
-    const mudou = (novo && novo.id) !== (S.user && S.user.id);
-    S.user = novo;
-    if (!novo) { S.mode = "auth"; S.authTab = "entrar"; S.clientes = new Map(); S.produtos = []; S.profile = null; S.admin = null; outbox = []; render(); return; }
-    if (mudou && S.mode !== "recovery") { carregando = setTimeout(() => carregarPerfil(), 0); }
+  S.sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseKey, {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+    global: { fetch: fetchComTempo },
   });
-  const { data } = await S.sb.auth.getSession();
-  if (!data.session) { S.mode = "auth"; render(); }
-  document.addEventListener("visibilitychange", () => { if (!document.hidden && S.mode === "app") { flush(); } });
+  S.sb.auth.onAuthStateChange((event, session) => {
+    if (event === "PASSWORD_RECOVERY") { S.user = session.user; S.authOk = true; S.mode = "recovery"; render(); return; }
+    if (session) { setTimeout(() => entrarUsuario(session.user, true), 0); return; }
+    if (event === "SIGNED_OUT") setTimeout(sairLocal, 0);
+  });
+  let sess = null, err = null;
+  try { const r = await comTempo(S.sb.auth.getSession(), 8000); sess = r.data && r.data.session; err = r.error; } catch (e) { err = e; }
+  if (sess) { entrarUsuario(sess.user, true); }
+  else {
+    const last = ls.get(K_LAST);
+    if (last && last.id && (err || !navigator.onLine)) entrarUsuario(last, false);
+    else if (S.mode === "boot") { S.mode = "auth"; render(); }
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden || !S.user) return;
+    if (!S.authOk) { reconectar(); return; }
+    flush();
+    if (S.mode === "app" && !outbox.length && Date.now() - S.ultimaSync > 60000) sincronizar();
+  });
 }
 start();
+// guarda o sistema no aparelho para abrir sem internet
+if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(e => console.warn("sw", e)));
 })();
 </script>
 </body>
