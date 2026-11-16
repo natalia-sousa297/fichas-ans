@@ -14,13 +14,14 @@ Contas novas ficam "aguardando liberação" até você receber o PIX e liberar n
 - `supabase/funcionarios.sql`: funcionários e gravação por lançamento
 - `supabase/backups.sql`: cópias automáticas diárias
 - `supabase/logo.sql`: logo de cada loja
-- `supabase/rota.sql`: rodar por último (ordem da rota)
+- `supabase/rota.sql`: ordem da rota
+- `supabase/recebimento.sql`: rodar por último (guarda quem recebeu cada pagamento, para o recebimento do dia)
 - Logo: cada loja escolhe a sua em **Conta > Logo da loja** (fica no banco). Loja nova começa sem logo, só com o nome. No rodapé aparece "Desenvolvido por Empresa ANS".
 - `icon.svg`, `manifest.webmanifest`: ícone do aplicativo e instalação no celular
 
 ## Passos para colocar no ar (para o Claude da próxima sessão)
 
-1. Aplicar como migração, nesta ordem: `supabase/schema.sql`, `supabase/correcao-seguranca.sql`, `supabase/funcionarios.sql`, `supabase/backups.sql`, `supabase/logo.sql` e `supabase/rota.sql`.
+1. Aplicar como migração, nesta ordem: `supabase/schema.sql`, `supabase/correcao-seguranca.sql`, `supabase/funcionarios.sql`, `supabase/backups.sql`, `supabase/logo.sql`, `supabase/rota.sql` e `supabase/recebimento.sql`.
 2. Rodar os avisos de segurança (get_advisors) e corrigir o que aparecer. Ficam avisos esperados de funções que pessoas logadas podem chamar: `admin_set_status`, `funcionario_convidar`, `funcionario_remover`, `backup_agora` e `backup_restaurar`. Cada uma confere dentro dela quem está chamando.
 3. Preencher `config.js` com a URL do projeto e a chave publishable. Pedir à usuária o valor, a chave PIX, o nome do PIX e o WhatsApp de contato. Não inventar esses dados.
 4. Criar um repositório no GitHub da usuária e publicar pelo GitHub Pages, a partir da raiz da branch `main`. O arquivo `.nojekyll` já está incluído.
@@ -47,6 +48,16 @@ update public.profiles set is_admin = true, status = 'ativo', liberado_em = now(
 4. Essas travas valem no banco de dados, não só na tela.
 5. Para tirar o acesso, toque em **Remover**. Para devolver, **Devolver acesso**.
 6. Funcionário não paga licença. Se a loja for bloqueada, os funcionários dela também perdem o acesso.
+
+## Recebimento do dia
+
+1. Na tela **Visitas** aparece o quadro **Recebido hoje** com o total e quantos pagamentos entraram. Toque em **Ver o dia**.
+2. A tela mostra cada pagamento do dia com a hora, a forma (dinheiro, PIX ou cartão), quem recebeu e a observação. Em cima ficam o total e quanto entrou em cada forma.
+3. Use as setas ou a data para ver outro dia.
+4. A dona vê os pagamentos de todos e pode filtrar por pessoa, para conferir o dinheiro que cada funcionário trouxe. O funcionário vê só o que ele mesmo recebeu.
+5. **Enviar no WhatsApp** ou **Copiar** gera o resumo do dia em texto, para o funcionário mandar para a dona no fim do dia.
+6. Na hora de receber, escolha a forma de pagamento. O sistema lembra a última usada.
+7. Quem recebeu é gravado pelo banco, não pelo celular, então ninguém lança no nome de outra pessoa. Pagamentos lançados antes desta opção aparecem como "Sem registro" e sem forma.
 
 ## Sem internet
 

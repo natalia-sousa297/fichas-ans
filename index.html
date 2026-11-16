@@ -93,6 +93,15 @@ nav.tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; backgroun
 .stat { padding: 12px 14px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); display: grid; gap: 2px; }
 .stat b { font-size: 20px; font-variant-numeric: tabular-nums; }
 .stat.hot b { color: var(--danger); } .stat.good b { color: var(--accent); }
+.receb-btn { display: flex; align-items: center; gap: 12px; padding: 12px 14px; width: 100%; text-align: left; cursor: pointer; font: inherit; color: inherit; }
+.receb-btn .ic { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); flex: none; }
+.receb-btn .ic svg { width: 22px; height: 22px; }
+.receb-btn .grow { display: grid; gap: 1px; min-width: 0; }
+.receb-btn b { font-size: 20px; font-variant-numeric: tabular-nums; }
+.receb-btn small { color: var(--muted); font-size: 12px; }
+.receb-dia { flex-wrap: nowrap; }
+.receb-dia .btn { min-width: 44px; font-size: 18px; }
+.lbl-txt { font-size: 13px; font-weight: 600; color: var(--muted); }
 
 .section { display: grid; gap: 8px; }
 .section-h { display: flex; align-items: baseline; gap: 8px; }
@@ -522,7 +531,7 @@ function toast(msg) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => root.innerHTML = "", 2800);
 }
 function setTab(tab) {
-  S.tab = tab; S.clienteId = null; S.rotaAberta = false;
+  S.tab = tab; S.clienteId = null; S.rotaAberta = false; S.recebAberto = false;
   document.querySelectorAll(".tab").forEach(b => b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false"));
   render(); window.scrollTo(0, 0);
   if (tab === "conta" && S.profile && S.profile.is_admin) carregarLicencas();
@@ -558,6 +567,7 @@ function render(bg) {
   if (arraste) return; // não redesenha no meio de um arraste
   if (S.clienteId && S.clientes.has(S.clienteId)) app.innerHTML = viewFicha(S.clientes.get(S.clienteId));
   else if (S.tab === "hoje" && S.rotaAberta) app.innerHTML = viewRota();
+  else if (S.tab === "hoje" && S.recebAberto) app.innerHTML = viewRecebimento();
   else if (S.tab === "clientes") { S.clienteId = null; app.innerHTML = viewClientes(); }
   else if (S.tab === "produtos" && !ehFunc()) { S.clienteId = null; app.innerHTML = viewProdutos(); }
   else if (S.tab === "conta") { S.clienteId = null; app.innerHTML = viewConta(); }
@@ -681,6 +691,7 @@ function viewHoje() {
   const vencido = lista.reduce((s, x) => s + x.r.vencido, 0);
   const recebido = lista.reduce((s, x) => s + (x.c.pagamentos || []).filter(p => (p.data || "").startsWith(mes)).reduce((a, p) => a + p.valor, 0), 0);
   const vendido = lista.reduce((s, x) => s + (x.c.compras || []).filter(v => (v.data || "").startsWith(mes)).reduce((a, v) => a + v.total, 0), 0);
+  const recHoje = recebimentosDoDia(hoje), totHoje = recHoje.reduce((s, x) => s + x.p.valor, 0);
   const sec = (titulo, arr, hot, vazio) => `<section class="section">
       <div class="section-h"><h2>${titulo}</h2><span class="count ${hot && arr.length ? "hot" : ""}">${arr.length}</span></div>
       ${arr.length ? `<div class="list">${arr.map(x => clienteRow(x.c, x.r, "visita")).join("")}</div>` : `<p class="muted small" style="margin:0">${vazio}</p>`}
@@ -707,6 +718,11 @@ function viewHoje() {
       <div class="stat good"><span class="eyebrow">Recebido em ${esc(monthName())}</span><b>${money(recebido)}</b></div>
       <div class="stat"><span class="eyebrow">Vendido em ${esc(monthName())}</span><b>${money(vendido)}</b></div>
     </div>`}
+    ${vazio ? "" : `<button class="card receb-btn" data-action="receb-abrir">
+      <span class="ic">${I.cash}</span>
+      <span class="grow"><span class="eyebrow">${ehFunc() ? "Você recebeu hoje" : "Recebido hoje"}</span><b>${money(totHoje)}</b><small>${recHoje.length ? recHoje.length + (recHoje.length === 1 ? " pagamento" : " pagamentos") : "Nenhum pagamento ainda"}</small></span>
+      <span class="small" style="font-weight:700;color:var(--accent)">Ver o dia ›</span>
+    </button>`}
     ${vazio ? "" : `<div class="row">
       <div class="chips grow" role="group" aria-label="Ordem das visitas">
         <button class="chip" data-action="modo-visitas" data-m="rota" aria-pressed="${porRota}">Ordem da rota</button>
@@ -719,6 +735,85 @@ function viewHoje() {
       ${sec("Passar hoje", hojeL, false, "Nenhuma visita marcada para hoje.")}`}
       ${sec("Próximos 7 dias", prox, false, "Nada marcado para a próxima semana.")}
       <div class="row"><button class="btn primary grow" data-action="novo-cliente">${I.plus} Novo cliente</button></div>`}`;
+}
+
+/* ---------- recebimento do dia ---------- */
+const FORMAS = { dinheiro: "Dinheiro", pix: "PIX", cartao: "Cartão" };
+const kForma = () => "fichas:forma-pagamento";
+// funcionário vê só o que ele mesmo recebeu; a dona vê tudo
+function recebimentosDoDia(dia) {
+  const out = [];
+  for (const c of S.clientes.values()) for (const p of c.pagamentos || []) {
+    if (p.data !== dia) continue;
+    if (ehFunc() && p.por !== S.user.id) continue;
+    out.push({ c, p });
+  }
+  return out.sort((a, b) => (a.p.em || "~").localeCompare(b.p.em || "~") || compararRota(a.c, b.c));
+}
+const horaDe = em => { if (!em) return ""; const d = new Date(em); return isNaN(d) ? "" : pad2(d.getHours()) + ":" + pad2(d.getMinutes()); };
+function nomeQuemRecebeu(por) {
+  if (!por) return "";
+  if (por === S.user.id) return ehFunc() ? (S.profile.nome || "Você") : "Você";
+  const f = S.equipe && S.equipe.func && S.equipe.func.find(x => x.id === por);
+  return f ? (f.nome || f.email) : "Funcionário";
+}
+function textoRecebimento(dia, arr) {
+  const tot = arr.reduce((s, x) => s + x.p.valor, 0);
+  const linhas = [`*${lojaNome()}*`, `Recebimento do dia ${fmtDate(dia, true)}` + (ehFunc() ? ` · ${S.profile.nome || S.user.email}` : ""), ""];
+  for (const { c, p } of arr) linhas.push(`${horaDe(p.em) ? horaDe(p.em) + " " : ""}${c.nome}: ${pm(p.valor)}${p.forma ? ` (${FORMAS[p.forma] || p.forma})` : ""}`);
+  linhas.push("", `*Total: ${pm(tot)}*` + ` · ${arr.length} ${arr.length === 1 ? "pagamento" : "pagamentos"}`);
+  const formas = somaPor(arr, x => x.p.forma ? FORMAS[x.p.forma] || x.p.forma : "Sem forma informada");
+  if (formas.length > 1 || (formas[0] && formas[0].k !== "Sem forma informada")) for (const f of formas) linhas.push(`${f.k}: ${pm(f.v)}`);
+  return linhas.join("\n");
+}
+function somaPor(arr, chave) {
+  const m = new Map();
+  for (const x of arr) { const k = chave(x); const it = m.get(k) || { k, v: 0, n: 0 }; it.v += x.p.valor; it.n++; m.set(k, it); }
+  return [...m.values()].sort((a, b) => b.v - a.v);
+}
+function viewRecebimento() {
+  const hoje = today(), dia = S.recebData || hoje;
+  const todos = recebimentosDoDia(dia);
+  const quem = !ehFunc() && S.recebQuem ? S.recebQuem : "";
+  const arr = quem ? todos.filter(x => (x.p.por || "") === (quem === "-" ? "" : quem)) : todos;
+  const tot = arr.reduce((s, x) => s + x.p.valor, 0);
+  const formas = somaPor(arr, x => x.p.forma || "");
+  const pessoas = ehFunc() ? [] : somaPor(todos, x => x.p.por || "-");
+  const rotuloPessoa = k => k === "-" ? "Sem registro" : nomeQuemRecebeu(k);
+  const linha = ({ c, p }) => {
+    const sub = [horaDe(p.em), p.forma ? FORMAS[p.forma] || p.forma : "", !ehFunc() && p.por && pessoas.length > 1 ? nomeQuemRecebeu(p.por) : "", p.obs].filter(Boolean).join(" · ");
+    return `<button class="item" data-action="open" data-id="${esc(c.id)}">
+      <div class="fno">${String(c.numero || 0).padStart(3, "0")}</div>
+      <div class="who"><b>${esc(c.nome)}</b><span>${esc(sub || enderecoLinha(c) || "—")}</span></div>
+      <div class="val">${money(p.valor)}</div></button>`;
+  };
+  const texto = textoRecebimento(dia, arr);
+  return `<div class="row"><button class="btn ghost sm" data-action="receb-fechar">${I.back} Voltar</button></div>
+    <div class="row"><h1 class="page-h grow">Recebimento do dia</h1></div>
+    <div class="row receb-dia">
+      <button class="btn sm" data-action="receb-dia" data-d="-1" aria-label="Dia anterior">‹</button>
+      <input id="receb-data" class="input grow" type="date" value="${esc(dia)}" max="${esc(hoje)}" aria-label="Dia">
+      <button class="btn sm" data-action="receb-dia" data-d="1" aria-label="Dia seguinte" ${dia >= hoje ? "disabled" : ""}>›</button>
+    </div>
+    <p class="small muted" style="margin:0">${esc(weekday(dia))}, ${esc(relDay(dia))}${ehFunc() ? ". Aparecem só os pagamentos que você recebeu." : ""}</p>
+    <div class="balance">
+      <div><div class="lbl">${quem ? "Recebido por " + esc(rotuloPessoa(quem)) : "Total recebido"}</div><div class="big">${money(tot)}</div></div>
+      <div class="side"><span><b>${arr.length}</b> ${arr.length === 1 ? "pagamento" : "pagamentos"}</span>
+        ${formas.filter(f => f.k).map(f => `<span>${esc(FORMAS[f.k] || f.k)}: <b>${money(f.v)}</b></span>`).join("")}
+        ${formas.some(f => f.k) && formas.some(f => !f.k) ? `<span>Sem forma: <b>${money(formas.find(f => !f.k).v)}</b></span>` : ""}</div>
+    </div>
+    ${pessoas.length > 1 || (pessoas.length === 1 && pessoas[0].k !== S.user.id) ? `<div class="chips" role="group" aria-label="Quem recebeu">
+      <button class="chip" data-action="receb-quem" data-q="" aria-pressed="${!quem}">Todos · ${money(todos.reduce((s, x) => s + x.p.valor, 0))}</button>
+      ${pessoas.map(x => `<button class="chip" data-action="receb-quem" data-q="${esc(x.k)}" aria-pressed="${quem === x.k}">${esc(rotuloPessoa(x.k))} · ${money(x.v)}</button>`).join("")}
+    </div>` : ""}
+    <section class="section">
+      ${arr.length ? `<div class="list">${arr.map(linha).join("")}</div>` : `<div class="card empty"><p>Nenhum pagamento recebido ${dia === hoje ? "hoje" : "neste dia"}.</p></div>`}
+    </section>
+    ${arr.length ? `<div class="row">
+      <a class="btn sun grow" href="https://wa.me/?text=${encodeURIComponent(texto)}" target="_blank" rel="noopener">Enviar no WhatsApp</a>
+      <button class="btn grow" data-action="receb-copiar">Copiar</button>
+    </div>` : ""}
+    ${!ehFunc() && todos.some(x => !x.p.por) ? `<p class="small muted" style="margin:0">"Sem registro" são pagamentos lançados antes desta opção existir: neles o sistema não guardou quem recebeu.</p>` : ""}`;
 }
 
 /* ---------- rota ---------- */
@@ -906,7 +1001,7 @@ function viewFicha(c) {
             <div class="small muted" style="margin-top:4px">${(e.v.parcelas || []).map(p => `${fmtDate(p.venc)}: ${money(p.valor)}`).join(" · ")}</div></div>
           <div class="amt"><span>${money(e.v.total)}</span></div><div class="ev-btns"><button class="btn sm" data-action="resumo-venda" data-id="${esc(c.id)}" data-item="${esc(e.v.id)}">Resumo</button>${ehFunc() ? "" : `<button class="btn ghost sm" data-action="edit-venda" data-id="${esc(c.id)}" data-item="${esc(e.v.id)}" aria-label="Editar compra">${I.edit}</button>${delBtn("del-venda", c.id, e.v.id)}`}</div></div>`
         : `<div class="ev pay"><div class="ic">${I.cash}</div>
-          <div class="body"><b>Pagamento · ${fmtDate(e.data, true)}</b>${e.p.obs ? `<div class="small muted">${esc(e.p.obs)}</div>` : ""}</div>
+          <div class="body"><b>Pagamento · ${fmtDate(e.data, true)}${e.p.forma ? " · " + esc(FORMAS[e.p.forma] || e.p.forma) : ""}</b>${e.p.obs ? `<div class="small muted">${esc(e.p.obs)}</div>` : ""}</div>
           <div class="amt"><span>− ${money(e.p.valor)}</span>${ehFunc() ? "" : delBtn("del-pag", c.id, e.p.id)}</div></div>`).join("")}</div>`
         : `<div class="card empty"><p>Nenhuma compra lançada ainda.</p>${podeVender() ? `<button class="btn primary" data-action="venda" data-id="${esc(c.id)}">${I.cart} Lançar primeira venda</button>` : ""}</div>`}
     </section>
@@ -1111,7 +1206,7 @@ function viewEquipe() {
   }
   return `<section class="section">
     <div class="section-h"><h2>Funcionários</h2><span class="grow"></span><button class="btn ghost sm" data-action="equipe-reload">Atualizar</button></div>
-    <p class="small muted" style="margin:0">O funcionário vê as visitas e as fichas, cadastra clientes, recebe pagamentos e marca visitas${S.config.funcVendas ? " e lança vendas" : ""}. Ele <b>não vê</b> os totais da loja (a receber, vencido, recebido e vendido no mês), não baixa a cópia de segurança e não exclui nem corrige lançamentos.</p>
+    <p class="small muted" style="margin:0">O funcionário vê as visitas e as fichas, cadastra clientes, recebe pagamentos e marca visitas${S.config.funcVendas ? " e lança vendas" : ""}. No <b>Recebimento do dia</b> ele vê só o que ele mesmo recebeu; você vê o de todos. Ele <b>não vê</b> os totais da loja (a receber, vencido, recebido e vendido no mês), não baixa a cópia de segurança e não exclui nem corrige lançamentos.</p>
     ${body}
     <form id="func-form" class="card pad" style="display:grid;gap:10px" novalidate>
       <div class="grid2">
@@ -1132,7 +1227,7 @@ async function carregarEquipe() {
   ]);
   const e = f.error || c.error;
   S.equipe = e ? { error: isNetErr(e) ? "Sem internet. Conecte para ver e cadastrar funcionários." : "Não foi possível carregar: " + e.message } : { func: f.data || [], convites: c.data || [] };
-  if (S.tab === "conta" && !S.clienteId) render(true);
+  if ((S.tab === "conta" || S.recebAberto) && !S.clienteId) render(true);
 }
 function viewAdmin() {
   const L = S.admin;
@@ -1435,9 +1530,12 @@ function formPagamento(c) {
       ${r.vencido && r.vencido !== r.saldo ? `<button type="button" class="chip" data-v="${r.vencido}">Só o vencido · ${money(r.vencido)}</button>` : ""}
       ${r.prox && r.prox.falta !== r.saldo && r.prox.falta !== r.vencido ? `<button type="button" class="chip" data-v="${r.prox.falta}">1 parcela · ${money(r.prox.falta)}</button>` : ""}
     </div>
+    <div class="field"><span class="lbl-txt">Forma de pagamento</span><div class="chips" role="group" aria-label="Forma de pagamento" id="p-forma">
+      ${Object.entries(FORMAS).map(([k, n]) => `<button type="button" class="chip" data-f="${k}" aria-pressed="${(ls.get(kForma()) || "dinheiro") === k}">${n}</button>`).join("")}
+    </div></div>
     <div class="grid2"><div class="field"><label for="p-data">Data</label><input id="p-data" class="input" type="date" value="${today()}"></div><div class="field"><label for="p-visita">Voltar no dia</label><input id="p-visita" class="input" type="date"></div></div>
     <div class="small muted" id="p-resto"></div>
-    <div class="field"><label for="p-obs">Observação</label><input id="p-obs" class="input" placeholder="Ex.: pagou em dinheiro, pediu para voltar dia 10"></div>
+    <div class="field"><label for="p-obs">Observação</label><input id="p-obs" class="input" placeholder="Ex.: pediu para voltar dia 10"></div>
     <div class="err-msg" id="p-err" hidden></div>
     <button type="submit" class="btn primary">Registrar pagamento</button>
   `, form => {
@@ -1452,6 +1550,7 @@ function formPagamento(c) {
     recompute();
     vEl.addEventListener("input", recompute);
     visEl.addEventListener("input", () => visitaTocada = true);
+    form.querySelectorAll("#p-forma [data-f]").forEach(b => b.addEventListener("click", () => form.querySelectorAll("#p-forma [data-f]").forEach(x => x.setAttribute("aria-pressed", String(x === b)))));
     form.querySelectorAll("[data-v]").forEach(b => b.addEventListener("click", () => { vEl.value = centsToInput(+b.dataset.v); recompute(); }));
     form.addEventListener("submit", e => {
       e.preventDefault();
@@ -1459,7 +1558,9 @@ function formPagamento(c) {
       if (v <= 0) { er.textContent = "Digite o valor recebido."; er.hidden = false; return; }
       if (v > r.saldo) { er.textContent = `O valor não pode passar do saldo (${money(r.saldo)}).`; er.hidden = false; return; }
       const cur = S.clientes.get(c.id);
-      const pag = { id: rid(), data: form.querySelector("#p-data").value || today(), valor: v, obs: form.querySelector("#p-obs").value.trim() };
+      const fb = form.querySelector('#p-forma [aria-pressed="true"]'), forma = fb ? fb.dataset.f : "";
+      if (forma) ls.set(kForma(), forma);
+      const pag = { id: rid(), data: form.querySelector("#p-data").value || today(), valor: v, obs: form.querySelector("#p-obs").value.trim(), forma, em: new Date().toISOString(), por: S.user.id };
       closeSheet();
       enviar({ k: "pag+", cid: c.id, pag });
       if ((visEl.value || "") !== (cur.proximaVisita || "")) salvarCampos(c.id, { proxima_visita: visEl.value || "" });
@@ -1582,6 +1683,16 @@ app.addEventListener("click", async e => {
     case "enviar-copia": enviarCopia(); break;
     case "logo-remover": salvarLogo(null); break;
     case "modo-visitas": ls.set(kModoVisitas(), b.dataset.m); render(); break;
+    case "receb-abrir": S.recebAberto = true; S.recebData = today(); S.recebQuem = ""; render(); window.scrollTo(0, 0); if (!ehFunc() && !S.equipe) carregarEquipe(); break;
+    case "receb-fechar": S.recebAberto = false; render(); window.scrollTo(0, 0); break;
+    case "receb-dia": { const d = addDays(S.recebData || today(), +b.dataset.d); S.recebData = d > today() ? today() : d; render(); break; }
+    case "receb-quem": S.recebQuem = b.dataset.q; render(); break;
+    case "receb-copiar": {
+      const dia = S.recebData || today(), q = S.recebQuem;
+      const arr = recebimentosDoDia(dia).filter(x => ehFunc() || !q || (x.p.por || "") === (q === "-" ? "" : q));
+      try { await navigator.clipboard.writeText(textoRecebimento(dia, arr)); toast("Copiado"); } catch (_) { toast("Não foi possível copiar"); }
+      break;
+    }
     case "rota-abrir": S.rotaAberta = true; render(); window.scrollTo(0, 0); break;
     case "rota-pronto": S.rotaAberta = false; render(); window.scrollTo(0, 0); toast("Rota salva"); break;
     case "rota-lista": S.rotaLista = b.dataset.l; render(); break;
@@ -1613,6 +1724,9 @@ app.addEventListener("click", async e => {
       carregarLicencas(); break;
     }
   }
+});
+app.addEventListener("change", e => {
+  if (e.target.id === "receb-data") { const v = e.target.value; S.recebData = !v ? today() : v > today() ? today() : v; render(); }
 });
 app.addEventListener("input", e => {
   if (e.target.id === "busca") { S.busca = e.target.value; const l = document.getElementById("lista"); if (l) l.innerHTML = listaClientesHTML(); }
