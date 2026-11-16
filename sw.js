@@ -1,8 +1,8 @@
 // Fichas ANS: guarda o sistema no aparelho para abrir sem internet.
 // Os dados das fichas ficam no próprio aparelho (cópia local) e no Supabase; aqui só ficam os arquivos do site.
-const VERSAO = "fichas-v2";
+const VERSAO = "fichas-v3";
 const ARQUIVOS = [
-  "./", "index.html", "config.js", "logo.png", "icon.svg", "manifest.webmanifest",
+  "./", "index.html", "config.js", "icon.svg", "manifest.webmanifest",
   "vendor/supabase.js", "vendor/jspdf.umd.min.js",
 ];
 
