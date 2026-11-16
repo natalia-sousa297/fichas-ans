@@ -1092,7 +1092,12 @@ function formVenda(c, venda) {
       const cur = S.clientes.get(c.id);
       closeSheet();
       enviar({ k: "venda", cid: c.id, venda: nova });
-      if (!cur.proximaVisita || cur.proximaVisita < today()) salvarCampos(c.id, { proxima_visita: nova.parcelas[0].venc });
+      // a visita acompanha o vencimento: vazia ou já passada, vencimento antigo desta compra
+      // (compra editada) ou um vencimento novo que chega antes da visita marcada
+      const vis = cur.proximaVisita || "", novaVenc = nova.parcelas[0].venc;
+      const vencAntiga = editando && venda.parcelas && venda.parcelas[0] ? venda.parcelas[0].venc : "";
+      if (vis !== novaVenc && (!vis || vis < today() || (vencAntiga && vis === vencAntiga) || (!editando && novaVenc < vis)))
+        salvarCampos(c.id, { proxima_visita: novaVenc });
       toast(editando ? "Compra atualizada" : "Venda de " + money(total) + " lançada");
       if (!editando) setTimeout(() => resumoVenda(S.clientes.get(c.id), nova.id, true), 250);
     });
