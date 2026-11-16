@@ -13,13 +13,14 @@ Contas novas ficam "aguardando liberação" até você receber o PIX e liberar n
 - `supabase/correcao-seguranca.sql`: rodar logo depois do `schema.sql` (tira as funções internas da API)
 - `supabase/funcionarios.sql`: funcionários e gravação por lançamento
 - `supabase/backups.sql`: cópias automáticas diárias
-- `supabase/logo.sql`: rodar por último (logo de cada loja)
+- `supabase/logo.sql`: logo de cada loja
+- `supabase/rota.sql`: rodar por último (ordem da rota)
 - Logo: cada loja escolhe a sua em **Conta > Logo da loja** (fica no banco). Loja nova começa sem logo, só com o nome. No rodapé aparece "Desenvolvido por Empresa ANS".
 - `icon.svg`, `manifest.webmanifest`: ícone do aplicativo e instalação no celular
 
 ## Passos para colocar no ar (para o Claude da próxima sessão)
 
-1. Aplicar como migração, nesta ordem: `supabase/schema.sql`, `supabase/correcao-seguranca.sql`, `supabase/funcionarios.sql`, `supabase/backups.sql` e `supabase/logo.sql`.
+1. Aplicar como migração, nesta ordem: `supabase/schema.sql`, `supabase/correcao-seguranca.sql`, `supabase/funcionarios.sql`, `supabase/backups.sql`, `supabase/logo.sql` e `supabase/rota.sql`.
 2. Rodar os avisos de segurança (get_advisors) e corrigir o que aparecer. Ficam avisos esperados de funções que pessoas logadas podem chamar: `admin_set_status`, `funcionario_convidar`, `funcionario_remover`, `backup_agora` e `backup_restaurar`. Cada uma confere dentro dela quem está chamando.
 3. Preencher `config.js` com a URL do projeto e a chave publishable. Pedir à usuária o valor, a chave PIX, o nome do PIX e o WhatsApp de contato. Não inventar esses dados.
 4. Criar um repositório no GitHub da usuária e publicar pelo GitHub Pages, a partir da raiz da branch `main`. O arquivo `.nojekyll` já está incluído.
